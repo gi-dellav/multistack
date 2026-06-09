@@ -49,7 +49,10 @@ async fn run() -> std::io::Result<()> {
     let mut reader = EventStream::new();
 
     loop {
-        check_tty_alive(&mut mode, &processes);
+        if check_tty_alive(&mut mode, &processes) {
+            let size = terminal.size()?;
+            terminal.resize(size.into())?;
+        }
 
         render(&mut terminal, &mode, &processes, term_rows, term_cols)?;
 

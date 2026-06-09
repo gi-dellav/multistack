@@ -27,7 +27,7 @@ impl Drop for Process {
     }
 }
 
-pub fn check_tty_alive(mode: &mut Mode, processes: &[Process]) {
+pub fn check_tty_alive(mode: &mut Mode, processes: &[Process]) -> bool {
     if let Mode::Tty { process_id } = mode {
         let pid = *process_id;
         let alive = processes
@@ -38,10 +38,12 @@ pub fn check_tty_alive(mode: &mut Mode, processes: &[Process]) {
             Some(false) | None => {
                 let idx = processes.iter().position(|p| p.id == pid).unwrap_or(0);
                 *mode = Mode::Normal { selected: idx };
+                return true;
             }
             _ => {}
         }
     }
+    false
 }
 
 pub fn spawn_process(
