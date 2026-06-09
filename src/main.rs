@@ -54,9 +54,16 @@ async fn run() -> std::io::Result<()> {
     let mut term_cols = cols;
 
     let mut reader = EventStream::new();
+    let mut suppress_quit = false;
 
     loop {
+        let was_tty = matches!(mode, Mode::Tty { .. });
+
         if check_tty_alive(&mut mode, &mut processes) {
+            let is_normal = matches!(mode, Mode::Normal { .. });
+            if was_tty && is_normal {
+                suppress_quit = true;
+            }
             let size = terminal.size()?;
             terminal.resize(size.into())?;
         }
@@ -69,6 +76,8 @@ async fn run() -> std::io::Result<()> {
             maybe_event = reader.next() => {
                 match maybe_event {
                     Some(Ok(event)) => {
+                        let was_tty_before_event = matches!(mode, Mode::Tty { .. });
+
                         let should_quit = process_event(
                             &mut mode,
                             &mut processes,
@@ -79,7 +88,15 @@ async fn run() -> std::io::Result<()> {
                             &mut term_cols,
                         )?;
 
+                        if was_tty_before_event && matches!(mode, Mode::Normal { .. }) {
+                            suppress_quit = true;
+                        }
+
                         if should_quit {
+                            if suppress_quit {
+                                suppress_quit = false;
+                                continue;
+                            }
                             execute!(terminal.backend_mut(), cursor::Show, terminal::LeaveAlternateScreen)?;
                             disable_raw_mode()?;
                             return Ok(());
