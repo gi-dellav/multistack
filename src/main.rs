@@ -1,5 +1,6 @@
 mod input;
 mod process;
+mod status;
 mod ui;
 
 use std::io::stdout;
@@ -15,7 +16,7 @@ use portable_pty::NativePtySystem;
 use ratatui::{Terminal, backend::CrosstermBackend};
 
 use input::process_event;
-use process::{Process, check_tty_alive};
+use process::{Process, check_tty_alive, sync_statuses};
 use ui::render;
 
 enum PromptPurpose {
@@ -60,6 +61,7 @@ async fn run() -> std::io::Result<()> {
             terminal.resize(size.into())?;
         }
 
+        sync_statuses(&processes);
         render(&mut terminal, &mode, &processes, term_rows, term_cols)?;
 
         tokio::select! {

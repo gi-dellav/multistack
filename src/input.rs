@@ -127,7 +127,10 @@ fn process_key(
                 match purpose {
                     PromptPurpose::NewProcess => {
                         let title_opt = if title.is_empty() { None } else { Some(title.as_str()) };
-                        let proc = spawn_process(pty_system, next_id, "zerostack", &["--parallel"], title_opt, term_rows, term_cols)?;
+                        let id = *next_id;
+                        let socket_path = format!("/tmp/multistack-{}.sock", id);
+                        let args = ["--parallel", "--status-socket", &socket_path];
+                        let proc = spawn_process(pty_system, next_id, "zerostack", &args, title_opt, term_rows, term_cols, Some(&socket_path))?;
                         if processes.is_empty() {
                             *selected = 0;
                         }

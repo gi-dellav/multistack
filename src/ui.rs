@@ -12,6 +12,7 @@ use ratatui::Terminal;
 use crate::Mode;
 use crate::PromptPurpose;
 use crate::process::Process;
+use crate::status;
 
 pub fn render(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
@@ -63,12 +64,10 @@ fn render_normal(
             let items: Vec<String> = processes
                 .iter()
                 .map(|p| {
-                    let dead = if !p.alive.load(Ordering::SeqCst) {
-                        " [dead]"
-                    } else {
-                        ""
-                    };
-                    format!("{}{}", p.name, dead)
+                    let prefix = status::status_prefix(p.status.load(Ordering::SeqCst));
+                    let cycle = p.cycle_start.lock();
+                    let timer = status::format_timer(p.active_ms.load(Ordering::SeqCst), &cycle);
+                    format!("{} {}  {}", prefix, p.name, timer)
                 })
                 .collect();
 
@@ -117,12 +116,10 @@ fn render_prompt(
             let items: Vec<String> = processes
                 .iter()
                 .map(|p| {
-                    let dead = if !p.alive.load(Ordering::SeqCst) {
-                        " [dead]"
-                    } else {
-                        ""
-                    };
-                    format!("{}{}", p.name, dead)
+                    let prefix = status::status_prefix(p.status.load(Ordering::SeqCst));
+                    let cycle = p.cycle_start.lock();
+                    let timer = status::format_timer(p.active_ms.load(Ordering::SeqCst), &cycle);
+                    format!("{} {}  {}", prefix, p.name, timer)
                 })
                 .collect();
 

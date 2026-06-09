@@ -1,11 +1,14 @@
 use std::io::{Read, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::thread::JoinHandle;
+use std::time::Instant;
 
 use parking_lot::Mutex;
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 
 use crate::Mode;
+use crate::status;
 
 pub struct Process {
     pub id: usize,
@@ -15,10 +18,25 @@ pub struct Process {
     pub master_writer: Option<Box<dyn Write + Send>>,
     pub parser: Arc<Mutex<vt100::Parser>>,
     pub alive: Arc<AtomicBool>,
+    pub status: Arc<AtomicU8>,
+    pub active_ms: Arc<AtomicU64>,
+    pub cycle_start: Arc<Mutex<Option<Instant>>>,
+    status_socket_path: Option<String>,
+    _shutdown_flag: Option<Arc<AtomicBool>>,
+    _listener_thread: Option<JoinHandle<()>>,
 }
 
 impl Drop for Process {
     fn drop(&mut self) {
+        if let Some(ref flag) = self._shutdown_flag {
+            flag.store(true, Ordering::SeqCst);
+        }
+        if let Some(handle) = self._listener_thread.take() {
+            let _ = handle.join();
+        }
+        if let Some(ref path) = self.status_socket_path {
+            let _ = std::fs::remove_file(path);
+        }
         drop(self.master_writer.take());
         drop(self.master.take());
         if let Some(ref mut child) = self.child {
@@ -61,6 +79,7 @@ pub fn spawn_process(
     title: Option<&str>,
     rows: u16,
     cols: u16,
+    status_socket: Option<&str>,
 ) -> std::io::Result<Process> {
     let id = *next_id;
     *next_id += 1;
@@ -128,6 +147,21 @@ pub fn spawn_process(
         format!("{} [{}]", display, id)
     };
 
+    let status = Arc::new(AtomicU8::new(status::STATUS_NOT_YET));
+    let active_ms = Arc::new(AtomicU64::new(0));
+    let cycle_start = Arc::new(Mutex::new(None));
+    let (status_socket_path, shutdown_flag, listener_thread) = if let Some(path) = status_socket {
+        let (flag, handle) = status::spawn_status_listener(
+            status.clone(),
+            active_ms.clone(),
+            cycle_start.clone(),
+            path.to_string(),
+        );
+        (Some(path.to_string()), Some(flag), Some(handle))
+    } else {
+        (None, None, None)
+    };
+
     Ok(Process {
         id,
         name,
@@ -136,5 +170,20 @@ pub fn spawn_process(
         master_writer: Some(writer),
         parser,
         alive,
+        status,
+        active_ms,
+        cycle_start,
+        status_socket_path,
+        _shutdown_flag: shutdown_flag,
+        _listener_thread: listener_thread,
     })
+}
+
+pub fn sync_statuses(processes: &[Process]) {
+    for p in processes {
+        if !p.alive.load(Ordering::SeqCst) && p.status.load(Ordering::SeqCst) == status::STATUS_WORKING {
+            p.status.store(status::STATUS_DEAD, Ordering::SeqCst);
+            p.cycle_start.lock().take();
+        }
+    }
 }
