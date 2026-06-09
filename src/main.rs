@@ -90,6 +90,10 @@ async fn run() -> std::io::Result<()> {
 
                         if was_tty_before_event && matches!(mode, Mode::Normal { .. }) {
                             suppress_quit = true;
+                            let size = terminal.size()?;
+                            terminal.resize(size.into())?;
+                            sync_statuses(&processes);
+                            render(&mut terminal, &mode, &processes, term_rows, term_cols)?;
                         }
 
                         if should_quit {
