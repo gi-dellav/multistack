@@ -18,9 +18,15 @@ use input::process_event;
 use process::{Process, check_tty_alive};
 use ui::render;
 
+enum PromptPurpose {
+    NewProcess,
+    Rename(usize),
+}
+
 enum Mode {
     Normal { selected: usize },
     Tty { process_id: usize },
+    Prompt { purpose: PromptPurpose, selected: usize, input: String },
 }
 
 fn main() -> std::io::Result<()> {

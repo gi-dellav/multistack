@@ -4,6 +4,7 @@ use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use portable_pty::{NativePtySystem, PtySize};
 
 use crate::Mode;
+use crate::PromptPurpose;
 use crate::process::{Process, spawn_process};
 
 pub fn process_event(
@@ -50,11 +51,24 @@ fn process_key(
     match mode {
         Mode::Normal { selected } => match key.code {
             KeyCode::Char('n') => {
-                let proc = spawn_process(pty_system, next_id, "zerostack", &["--parallel"], term_rows, term_cols)?;
-                if processes.is_empty() {
-                    *selected = 0;
+                *mode = Mode::Prompt {
+                    purpose: PromptPurpose::NewProcess,
+                    selected: *selected,
+                    input: String::new(),
+                };
+            }
+            KeyCode::Char('r') => {
+                if !processes.is_empty() && *selected < processes.len() {
+                    let pid = processes[*selected].id;
+                    let current = processes[*selected].name.clone();
+                    let suffix = format!(" [{}]", pid);
+                    let default = current.strip_suffix(&suffix).unwrap_or(&current).to_string();
+                    *mode = Mode::Prompt {
+                        purpose: PromptPurpose::Rename(pid),
+                        selected: *selected,
+                        input: default,
+                    };
                 }
-                processes.push(proc);
             }
             KeyCode::Char('k') => {
                 if !processes.is_empty() && *selected < processes.len() {
@@ -103,6 +117,41 @@ fn process_key(
                 }
             }
         }
+        Mode::Prompt { purpose, selected, input } => match key.code {
+            KeyCode::Esc => {
+                *mode = Mode::Normal { selected: *selected };
+            }
+            KeyCode::Enter => {
+                let title = std::mem::take(input);
+                let title = title.trim().to_string();
+                match purpose {
+                    PromptPurpose::NewProcess => {
+                        let title_opt = if title.is_empty() { None } else { Some(title.as_str()) };
+                        let proc = spawn_process(pty_system, next_id, "zerostack", &["--parallel"], title_opt, term_rows, term_cols)?;
+                        if processes.is_empty() {
+                            *selected = 0;
+                        }
+                        processes.push(proc);
+                    }
+                    PromptPurpose::Rename(pid) => {
+                        if !title.is_empty() {
+                            if let Some(proc) = processes.iter_mut().find(|p| p.id == *pid) {
+                                proc.name = format!("{} [{}]", title, pid);
+                            }
+                        }
+                    }
+                }
+                let new_selected = if processes.is_empty() { 0 } else { *selected };
+                *mode = Mode::Normal { selected: new_selected };
+            }
+            KeyCode::Backspace => {
+                input.pop();
+            }
+            KeyCode::Char(c) => {
+                input.push(c);
+            }
+            _ => {}
+        },
     }
     Ok(false)
 }

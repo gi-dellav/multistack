@@ -51,6 +51,7 @@ pub fn spawn_process(
     next_id: &mut usize,
     cmd: &str,
     args: &[&str],
+    title: Option<&str>,
     rows: u16,
     cols: u16,
 ) -> std::io::Result<Process> {
@@ -109,15 +110,20 @@ pub fn spawn_process(
         alive_clone.store(false, Ordering::SeqCst);
     });
 
-    let display = if args.is_empty() {
-        cmd.to_string()
+    let name = if let Some(title) = title {
+        format!("{} [{}]", title, id)
     } else {
-        format!("{} {}", cmd, args.join(" "))
+        let display = if args.is_empty() {
+            cmd.to_string()
+        } else {
+            format!("{} {}", cmd, args.join(" "))
+        };
+        format!("{} [{}]", display, id)
     };
 
     Ok(Process {
         id,
-        name: format!("{} [{}]", display, id),
+        name,
         child: Some(child),
         master: Some(pair.master),
         master_writer: Some(writer),
