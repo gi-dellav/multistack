@@ -27,7 +27,7 @@ impl Drop for Process {
     }
 }
 
-pub fn check_tty_alive(mode: &mut Mode, processes: &[Process]) -> bool {
+pub fn check_tty_alive(mode: &mut Mode, processes: &mut Vec<Process>) -> bool {
     if let Mode::Tty { process_id } = mode {
         let pid = *process_id;
         let alive = processes
@@ -35,9 +35,16 @@ pub fn check_tty_alive(mode: &mut Mode, processes: &[Process]) -> bool {
             .find(|p| p.id == pid)
             .map(|p| p.alive.load(Ordering::SeqCst));
         match alive {
-            Some(false) | None => {
+            Some(false) => {
                 let idx = processes.iter().position(|p| p.id == pid).unwrap_or(0);
-                *mode = Mode::Normal { selected: idx };
+                processes.retain(|p| p.id != pid);
+                let selected = if processes.is_empty() { 0 } else { idx.min(processes.len() - 1) };
+                *mode = Mode::Normal { selected };
+                return true;
+            }
+            None => {
+                let selected = if processes.is_empty() { 0 } else { 0 };
+                *mode = Mode::Normal { selected };
                 return true;
             }
             _ => {}
