@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use notify_rust::Notification;
 use parking_lot::Mutex;
 
 pub const STATUS_NOT_YET: u8 = 0;
@@ -43,6 +44,7 @@ pub fn spawn_status_listener(
     active_ms: Arc<AtomicU64>,
     cycle_start: Arc<Mutex<Option<Instant>>>,
     socket_path: String,
+    process_name: String,
 ) -> (Arc<AtomicBool>, JoinHandle<()>) {
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_clone = shutdown.clone();
@@ -82,6 +84,10 @@ pub fn spawn_status_listener(
                                 }
                                 if status.load(Ordering::SeqCst) == STATUS_WORKING {
                                     status.store(STATUS_FINISHED, Ordering::SeqCst);
+                                    let _ = Notification::new()
+                                        .summary("Agent finished")
+                                        .body(&format!("{} has completed", &process_name))
+                                        .show();
                                 }
                             }
                             _ => {}

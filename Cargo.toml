@@ -13,6 +13,7 @@ keywords = ["ai", "cli", "tui", "dev"]
 [dependencies]
 crossterm = { version = "0.29.0", features = ["event-stream"] }
 futures = "0.3"
+notify-rust = "4.17.0"
 parking_lot = "0.12.5"
 portable-pty = "0.9.0"
 ratatui = { version = "0.30", features = ["crossterm"] }

@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Instant;
 
+use notify_rust::Notification;
 use parking_lot::Mutex;
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 
@@ -156,6 +157,7 @@ pub fn spawn_process(
             active_ms.clone(),
             cycle_start.clone(),
             path.to_string(),
+            name.clone(),
         );
         (Some(path.to_string()), Some(flag), Some(handle))
     } else {
@@ -184,6 +186,10 @@ pub fn sync_statuses(processes: &[Process]) {
         if !p.alive.load(Ordering::SeqCst) && p.status.load(Ordering::SeqCst) == status::STATUS_WORKING {
             p.status.store(status::STATUS_DEAD, Ordering::SeqCst);
             p.cycle_start.lock().take();
+            let _ = Notification::new()
+                .summary("Agent died")
+                .body(&format!("{} has terminated unexpectedly", &p.name))
+                .show();
         }
     }
 }
