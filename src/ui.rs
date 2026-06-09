@@ -2,12 +2,12 @@ use std::io::Write;
 use std::sync::atomic::Ordering;
 
 use crossterm::{cursor, execute};
+use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListState};
-use ratatui::Terminal;
 
 use crate::Mode;
 use crate::PromptPurpose;
@@ -18,15 +18,19 @@ pub fn render(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     mode: &Mode,
     processes: &[Process],
-    _rows: u16,
-    _cols: u16,
+    rows: u16,
+    cols: u16,
 ) -> std::io::Result<()> {
     match mode {
-        Mode::Normal { selected } => render_normal(terminal, processes, *selected),
-        Mode::Prompt { purpose, selected, input } => render_prompt(terminal, processes, *selected, purpose, input),
+        Mode::Normal { selected } => render_normal(terminal, processes, *selected, rows, cols),
+        Mode::Prompt {
+            purpose,
+            selected,
+            input,
+        } => render_prompt(terminal, processes, *selected, purpose, input, rows, cols),
         Mode::Tty { process_id } => {
             if let Some(proc) = processes.iter().find(|p| p.id == *process_id) {
-                render_tty(terminal, proc)
+                render_tty(terminal, proc, rows, cols)
             } else {
                 Ok(())
             }
@@ -38,6 +42,8 @@ fn render_normal(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     processes: &[Process],
     selected: usize,
+    _rows: u16,
+    cols: u16,
 ) -> std::io::Result<()> {
     terminal.draw(|frame| {
         let layout = Layout::vertical([
@@ -49,12 +55,14 @@ fn render_normal(
         ]);
         let [title_area, sep_area, _, list_area, help_area] = frame.area().layout(&layout);
 
-        let title = Line::from(vec![
-            Span::styled("Multistack", Style::default().add_modifier(Modifier::BOLD)),
-        ]);
+        let title = Line::from(vec![Span::styled(
+            "Multistack",
+            Style::default().add_modifier(Modifier::BOLD),
+        )]);
         frame.render_widget(title.centered(), title_area);
 
-        let sep = Line::from("════════════════════════════════");
+        let sep_width = cols as usize;
+        let sep = Line::from("═".repeat(sep_width));
         frame.render_widget(sep.centered(), sep_area);
 
         if processes.is_empty() {
@@ -78,7 +86,11 @@ fn render_normal(
             frame.render_stateful_widget(list, list_area, &mut list_state);
         }
 
-        let help = Line::from("n: new  r: rename  k: kill  Enter: TTY  q/Esc: quit");
+        let help = if cols < 40 {
+            Line::from("n:new r:ren k:kill Enter:TTY q:quit")
+        } else {
+            Line::from("n: new  r: rename  k: kill  Enter: TTY  q/Esc: quit")
+        };
         frame.render_widget(help, help_area);
     })?;
     Ok(())
@@ -90,6 +102,8 @@ fn render_prompt(
     selected: usize,
     purpose: &PromptPurpose,
     input: &str,
+    _rows: u16,
+    cols: u16,
 ) -> std::io::Result<()> {
     terminal.draw(|frame| {
         let layout = Layout::vertical([
@@ -101,12 +115,14 @@ fn render_prompt(
         ]);
         let [title_area, sep_area, _, list_area, help_area] = frame.area().layout(&layout);
 
-        let title = Line::from(vec![
-            Span::styled("Multistack", Style::default().add_modifier(Modifier::BOLD)),
-        ]);
+        let title = Line::from(vec![Span::styled(
+            "Multistack",
+            Style::default().add_modifier(Modifier::BOLD),
+        )]);
         frame.render_widget(title.centered(), title_area);
 
-        let sep = Line::from("════════════════════════════════");
+        let sep_width = cols as usize;
+        let sep = Line::from("═".repeat(sep_width));
         frame.render_widget(sep.centered(), sep_area);
 
         if processes.is_empty() {
@@ -143,6 +159,8 @@ fn render_prompt(
 fn render_tty(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     proc: &Process,
+    _rows: u16,
+    _cols: u16,
 ) -> std::io::Result<()> {
     let (contents, cursor_row, cursor_col) = {
         let parser = proc.parser.lock();

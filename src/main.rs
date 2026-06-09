@@ -7,8 +7,9 @@ use std::io::stdout;
 use std::time::Duration;
 
 use crossterm::{
-    cursor, execute,
+    cursor,
     event::EventStream,
+    execute,
     terminal::{self, disable_raw_mode, enable_raw_mode},
 };
 use futures::StreamExt;
@@ -25,9 +26,17 @@ enum PromptPurpose {
 }
 
 enum Mode {
-    Normal { selected: usize },
-    Tty { process_id: usize },
-    Prompt { purpose: PromptPurpose, selected: usize, input: String },
+    Normal {
+        selected: usize,
+    },
+    Tty {
+        process_id: usize,
+    },
+    Prompt {
+        purpose: PromptPurpose,
+        selected: usize,
+        input: String,
+    },
 }
 
 fn main() -> std::io::Result<()> {
@@ -56,6 +65,9 @@ async fn run() -> std::io::Result<()> {
     let mut reader = EventStream::new();
     let mut suppress_quit = false;
 
+    let mut render_interval = tokio::time::interval(Duration::from_millis(50));
+    render_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
     loop {
         let was_tty = matches!(mode, Mode::Tty { .. });
 
@@ -69,10 +81,11 @@ async fn run() -> std::io::Result<()> {
         }
 
         sync_statuses(&processes);
-        render(&mut terminal, &mode, &processes, term_rows, term_cols)?;
 
         tokio::select! {
-            _ = tokio::time::sleep(Duration::from_millis(50)) => continue,
+            _ = render_interval.tick() => {
+                render(&mut terminal, &mode, &processes, term_rows, term_cols)?;
+            }
             maybe_event = reader.next() => {
                 match maybe_event {
                     Some(Ok(event)) => {
@@ -94,9 +107,7 @@ async fn run() -> std::io::Result<()> {
                             terminal.resize(size.into())?;
                             sync_statuses(&processes);
                             render(&mut terminal, &mode, &processes, term_rows, term_cols)?;
-                        }
-
-                        if should_quit {
+                        } else if should_quit {
                             if suppress_quit {
                                 suppress_quit = false;
                                 continue;
@@ -104,9 +115,16 @@ async fn run() -> std::io::Result<()> {
                             execute!(terminal.backend_mut(), cursor::Show, terminal::LeaveAlternateScreen)?;
                             disable_raw_mode()?;
                             return Ok(());
+                        } else {
+                            render(&mut terminal, &mode, &processes, term_rows, term_cols)?;
                         }
                     }
-                    Some(Err(_)) => {}
+                    Some(Err(e)) => {
+                        eprintln!("Event stream error: {e}. Shutting down.");
+                        execute!(terminal.backend_mut(), cursor::Show, terminal::LeaveAlternateScreen)?;
+                        disable_raw_mode()?;
+                        return Err(e);
+                    }
                     None => {
                         execute!(terminal.backend_mut(), cursor::Show, terminal::LeaveAlternateScreen)?;
                         disable_raw_mode()?;

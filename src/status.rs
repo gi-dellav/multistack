@@ -1,7 +1,7 @@
 use std::io::Read;
 use std::os::unix::net::UnixListener;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -77,10 +77,8 @@ pub fn spawn_status_listener(
                             "stop" => {
                                 if let Some(start) = cycle_start.lock().take() {
                                     let elapsed = start.elapsed();
-                                    active_ms.fetch_add(
-                                        elapsed.as_millis() as u64,
-                                        Ordering::SeqCst,
-                                    );
+                                    active_ms
+                                        .fetch_add(elapsed.as_millis() as u64, Ordering::SeqCst);
                                 }
                                 if status.load(Ordering::SeqCst) == STATUS_WORKING {
                                     status.store(STATUS_FINISHED, Ordering::SeqCst);
@@ -100,10 +98,70 @@ pub fn spawn_status_listener(
                     }
                     std::thread::sleep(Duration::from_millis(100));
                 }
-                Err(_) => return,
+                Err(_) => {
+                    if shutdown_clone.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
             }
         }
     });
 
     (shutdown, handle)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+
+    #[test]
+    fn test_status_prefix_all_variants() {
+        assert_eq!(status_prefix(STATUS_NOT_YET), "[ ]");
+        assert_eq!(status_prefix(STATUS_WORKING), "[~]");
+        assert_eq!(status_prefix(STATUS_FINISHED), "[✓]");
+        assert_eq!(status_prefix(STATUS_DEAD), "[X]");
+        assert_eq!(status_prefix(99), "[ ]");
+    }
+
+    #[test]
+    fn test_format_timer_zero() {
+        assert_eq!(format_timer(0, &None), "0:00");
+    }
+
+    #[test]
+    fn test_format_timer_seconds_only() {
+        assert_eq!(format_timer(45_000, &None), "0:45");
+    }
+
+    #[test]
+    fn test_format_timer_minutes_and_seconds() {
+        assert_eq!(format_timer(125_000, &None), "2:05");
+    }
+
+    #[test]
+    fn test_format_timer_hours() {
+        assert_eq!(format_timer(3_660_000, &None), "1:01:00");
+    }
+
+    #[test]
+    fn test_format_timer_with_cycle_start() {
+        let now = Instant::now();
+        let start = now.checked_sub(Duration::from_millis(1500)).unwrap();
+        let total = format_timer(30_000, &Some(start));
+        assert!(total.starts_with("0:31"));
+    }
+
+    #[test]
+    fn test_format_timer_large_hours() {
+        assert_eq!(format_timer(36_000_000, &None), "10:00:00");
+    }
+
+    #[test]
+    fn test_format_timer_padding() {
+        assert_eq!(format_timer(5_000, &None), "0:05");
+        assert_eq!(format_timer(65_000, &None), "1:05");
+        assert_eq!(format_timer(3_605_000, &None), "1:00:05");
+    }
 }

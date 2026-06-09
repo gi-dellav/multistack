@@ -21,7 +21,7 @@ Multistack is designed to be a native, lightweight and open-soruce competitor to
 NOTE: Multistack is currently in beta stage, and requires *zerostack v1.5*, which is also in a beta stage.
 
 ```bash
-cargo install zerostack --version v1.5.0-rc1   # Run if you don't have zerostack v1.5+
+cargo install zerostack --version v1.5.0-rc2   # Run if you don't have zerostack v1.5+
 cargo install multistack --version v1.0.0-rc1
 ```
 
