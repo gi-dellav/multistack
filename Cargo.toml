@@ -2,6 +2,13 @@
 name = "multistack"
 version = "1.0.0-rc1"
 edition = "2024"
+authors = ["Giuseppe Della Vedova"]
+description = "Open source lightweight TUI for parallel agent management"
+license = "GPL-3.0-only"
+homepage = "https://github.com/gi-dellav/multistack"
+repository = "https://github.com/gi-dellav/multistack"
+readme = "README.md"
+keywords = ["ai", "cli", "tui", "dev"]
 
 [dependencies]
 crossterm = { version = "0.29.0", features = ["event-stream"] }
