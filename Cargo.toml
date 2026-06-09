@@ -8,5 +8,6 @@ crossterm = { version = "0.29.0", features = ["event-stream"] }
 futures = "0.3"
 parking_lot = "0.12.5"
 portable-pty = "0.9.0"
+ratatui = { version = "0.30", features = ["crossterm"] }
 tokio = { version = "1", features = ["full"] }
 vt100 = "0.16.2"
