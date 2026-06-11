@@ -64,6 +64,7 @@ async fn run() -> std::io::Result<()> {
 
     let mut reader = EventStream::new();
     let mut suppress_quit = false;
+    let mut confirm_quit = false;
 
     let mut render_interval = tokio::time::interval(Duration::from_millis(50));
     render_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -83,8 +84,8 @@ async fn run() -> std::io::Result<()> {
         sync_statuses(&processes);
 
         tokio::select! {
-            _ = render_interval.tick() => {
-                render(&mut terminal, &mode, &processes, term_rows, term_cols)?;
+                _ = render_interval.tick() => {
+                render(&mut terminal, &mode, &processes, term_rows, term_cols, confirm_quit)?;
             }
             maybe_event = reader.next() => {
                 match maybe_event {
@@ -103,20 +104,27 @@ async fn run() -> std::io::Result<()> {
 
                         if was_tty_before_event && matches!(mode, Mode::Normal { .. }) {
                             suppress_quit = true;
+                            confirm_quit = false;
                             let size = terminal.size()?;
                             terminal.resize(size.into())?;
                             sync_statuses(&processes);
-                            render(&mut terminal, &mode, &processes, term_rows, term_cols)?;
+                            render(&mut terminal, &mode, &processes, term_rows, term_cols, confirm_quit)?;
                         } else if should_quit {
                             if suppress_quit {
                                 suppress_quit = false;
+                                confirm_quit = true;
+                                render(&mut terminal, &mode, &processes, term_rows, term_cols, confirm_quit)?;
                                 continue;
                             }
                             execute!(terminal.backend_mut(), cursor::Show, terminal::LeaveAlternateScreen)?;
                             disable_raw_mode()?;
                             return Ok(());
                         } else {
-                            render(&mut terminal, &mode, &processes, term_rows, term_cols)?;
+                            if matches!(mode, Mode::Normal { .. }) {
+                                suppress_quit = false;
+                                confirm_quit = false;
+                            }
+                            render(&mut terminal, &mode, &processes, term_rows, term_cols, confirm_quit)?;
                         }
                     }
                     Some(Err(e)) => {
