@@ -29,19 +29,25 @@ pub fn build_entries(projects: &[Project], processes: &[Process]) -> Vec<ListEnt
     entries
 }
 
-pub fn resolve_project(entries: &[ListEntry], selected: usize) -> Option<usize> {
-    match entries.get(selected)? {
-        ListEntry::ProjectHeader(pid) => Some(*pid),
-        ListEntry::Agent(_) => {
-            let pid = entries[..selected].iter().rev().find_map(|e| {
+pub fn resolve_project(
+    entries: &[ListEntry],
+    projects: &[Project],
+    selected: usize,
+) -> Option<usize> {
+    match entries.get(selected) {
+        Some(ListEntry::ProjectHeader(pid)) => Some(*pid),
+        Some(ListEntry::Agent(_)) => entries[..selected]
+            .iter()
+            .rev()
+            .find_map(|e| {
                 if let ListEntry::ProjectHeader(pid) = e {
                     Some(*pid)
                 } else {
                     None
                 }
-            })?;
-            Some(pid)
-        }
+            })
+            .or_else(|| projects.first().map(|p| p.id)),
+        None => projects.first().map(|p| p.id),
     }
 }
 

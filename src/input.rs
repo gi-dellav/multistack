@@ -125,7 +125,7 @@ fn process_key(
         Mode::Normal { selected } => {
             match key.code {
                 KeyCode::Char('n') => {
-                    if let Some(project_id) = resolve_project(entries, *selected) {
+                    if let Some(project_id) = resolve_project(entries, projects, *selected) {
                         *mode = Mode::Prompt {
                             purpose: crate::PromptPurpose::NewProcess(project_id),
                             selected: *selected,
@@ -134,7 +134,7 @@ fn process_key(
                     }
                 }
                 KeyCode::Char('N') => {
-                    if let Some(project_id) = resolve_project(entries, *selected)
+                    if let Some(project_id) = resolve_project(entries, projects, *selected)
                         && let Some(dir) = find_project_dir(projects, project_id)
                     {
                         let new_selected = *selected;
@@ -157,7 +157,7 @@ fn process_key(
                     };
                 }
                 KeyCode::Char('l') => {
-                    if let Some(project_id) = resolve_project(entries, *selected) {
+                    if let Some(project_id) = resolve_project(entries, projects, *selected) {
                         let header_idx = entries[..=*selected]
                         .iter()
                         .rposition(|e| matches!(e, ListEntry::ProjectHeader(pid) if *pid == project_id))
