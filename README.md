@@ -21,8 +21,8 @@ Multistack is designed to be a native, lightweight and open-soruce competitor to
 NOTE: Multistack is currently in beta stage, and requires *zerostack v1.5*, which is also in a beta stage.
 
 ```bash
-cargo install zerostack --version 1.5.0-rc2   # Run if you don't have zerostack v1.5+
-cargo install multistack --version 1.0.0-rc1
+cargo install zerostack --version 1.5.0-rc4   # Run if you don't have zerostack v1.5+
+cargo install multistack --version 1.0.0-rc2
 ```
 
 You need [zerostack](https://gi-dellav.github.io/zerostack/) on your PATH, plus a recent Rust toolchain.
