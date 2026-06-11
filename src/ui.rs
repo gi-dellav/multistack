@@ -7,7 +7,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{List, ListState};
+use ratatui::widgets::{List, ListItem, ListState};
 
 use crate::Mode;
 use crate::PromptPurpose;
@@ -69,13 +69,19 @@ fn render_normal(
             let empty = Line::from("  (no processes)");
             frame.render_widget(empty, list_area);
         } else {
-            let items: Vec<String> = processes
+            let items: Vec<ListItem> = processes
                 .iter()
                 .map(|p| {
-                    let prefix = status::status_prefix(p.status.load(Ordering::SeqCst));
+                    let status_val = p.status.load(Ordering::SeqCst);
+                    let prefix = status::status_prefix(status_val);
+                    let color = status::status_color(status_val);
                     let cycle = p.cycle_start.lock();
                     let timer = status::format_timer(p.active_ms.load(Ordering::SeqCst), &cycle);
-                    format!("{} {}  {}", prefix, p.name, timer)
+                    let line = Line::from(vec![
+                        Span::styled(prefix.to_string(), Style::default().fg(color)),
+                        Span::from(format!(" {}  {}", p.name, timer)),
+                    ]);
+                    ListItem::new(line)
                 })
                 .collect();
 
@@ -129,13 +135,19 @@ fn render_prompt(
             let empty = Line::from("  (no processes)");
             frame.render_widget(empty, list_area);
         } else {
-            let items: Vec<String> = processes
+            let items: Vec<ListItem> = processes
                 .iter()
                 .map(|p| {
-                    let prefix = status::status_prefix(p.status.load(Ordering::SeqCst));
+                    let status_val = p.status.load(Ordering::SeqCst);
+                    let prefix = status::status_prefix(status_val);
+                    let color = status::status_color(status_val);
                     let cycle = p.cycle_start.lock();
                     let timer = status::format_timer(p.active_ms.load(Ordering::SeqCst), &cycle);
-                    format!("{} {}  {}", prefix, p.name, timer)
+                    let line = Line::from(vec![
+                        Span::styled(prefix.to_string(), Style::default().fg(color)),
+                        Span::from(format!(" {}  {}", p.name, timer)),
+                    ]);
+                    ListItem::new(line)
                 })
                 .collect();
 

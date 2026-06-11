@@ -23,6 +23,17 @@ pub fn status_prefix(status: u8) -> &'static str {
     }
 }
 
+pub fn status_color(status: u8) -> ratatui::style::Color {
+    use ratatui::style::Color;
+    match status {
+        STATUS_NOT_YET => Color::Gray,
+        STATUS_WORKING => Color::Yellow,
+        STATUS_FINISHED => Color::Green,
+        STATUS_DEAD => Color::Red,
+        _ => Color::Gray,
+    }
+}
+
 pub fn format_timer(active_ms: u64, cycle_start: &Option<Instant>) -> String {
     let total_ms = active_ms
         + cycle_start
