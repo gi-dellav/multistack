@@ -1,20 +1,25 @@
-use std::io::{Read, Write};
+use std::io::Read;
+use std::path::Path;
 
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use portable_pty::{NativePtySystem, PtySize};
 
 use crate::Mode;
-use crate::PromptPurpose;
 use crate::process::{Process, resize_parsers, spawn_process};
+use crate::project::{ListEntry, Project, is_agent, resolve_project};
 
+#[allow(clippy::too_many_arguments)]
 pub fn process_event(
     mode: &mut Mode,
+    projects: &mut Vec<Project>,
+    next_project_id: &mut usize,
     processes: &mut Vec<Process>,
     next_id: &mut usize,
     pty_system: &NativePtySystem,
     event: Event,
     term_rows: &mut u16,
     term_cols: &mut u16,
+    entries: &[ListEntry],
 ) -> std::io::Result<bool> {
     match event {
         Event::Resize(w, h) => {
@@ -34,7 +39,16 @@ pub fn process_event(
         }
         Event::Key(key) if key.kind != KeyEventKind::Release => {
             return process_key(
-                mode, processes, next_id, pty_system, key, *term_rows, *term_cols,
+                mode,
+                projects,
+                next_project_id,
+                processes,
+                next_id,
+                pty_system,
+                key,
+                *term_rows,
+                *term_cols,
+                entries,
             );
         }
         _ => {}
@@ -42,96 +56,180 @@ pub fn process_event(
     Ok(false)
 }
 
+fn find_project_dir(projects: &[Project], project_id: usize) -> Option<String> {
+    projects
+        .iter()
+        .find(|p| p.id == project_id)
+        .map(|p| p.directory.clone())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_zerostack(
+    pty_system: &NativePtySystem,
+    next_id: &mut usize,
+    processes: &mut Vec<Process>,
+    project_id: usize,
+    project_dir: &str,
+    title: Option<&str>,
+    term_rows: u16,
+    term_cols: u16,
+    selected: &mut usize,
+) {
+    let id = *next_id;
+    let mut rand_bytes = [0u8; 4];
+    let _ = std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut rand_bytes));
+    let rand_suffix = format!("{:08x}", u32::from_le_bytes(rand_bytes));
+    let socket_path = format!("/tmp/multistack-{}-{}.sock", id, rand_suffix);
+    let args = ["--parallel", "--status-socket", &socket_path];
+    match spawn_process(
+        pty_system,
+        next_id,
+        project_id,
+        "zerostack",
+        &args,
+        title,
+        term_rows,
+        term_cols,
+        Some(&socket_path),
+        project_dir,
+    ) {
+        Ok(proc) => {
+            if processes.is_empty() {
+                *selected = 0;
+            }
+            processes.push(proc);
+        }
+        Err(e) => {
+            let _ = notify_rust::Notification::new()
+                .summary("Failed to spawn agent")
+                .body(&format!("Could not launch zerostack: {e}"))
+                .show();
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn process_key(
     mode: &mut Mode,
+    projects: &mut Vec<Project>,
+    next_project_id: &mut usize,
     processes: &mut Vec<Process>,
     next_id: &mut usize,
     pty_system: &NativePtySystem,
     key: crossterm::event::KeyEvent,
     term_rows: u16,
     term_cols: u16,
+    entries: &[ListEntry],
 ) -> std::io::Result<bool> {
     match mode {
-        Mode::Normal { selected } => match key.code {
-            KeyCode::Char('n') => {
-                *mode = Mode::Prompt {
-                    purpose: PromptPurpose::NewProcess,
-                    selected: *selected,
-                    input: String::new(),
-                };
-            }
-            KeyCode::Char('N') => {
-                let id = *next_id;
-                let mut rand_bytes = [0u8; 4];
-                let _ = std::fs::File::open("/dev/urandom")
-                    .and_then(|mut f| f.read_exact(&mut rand_bytes));
-                let rand_suffix = format!("{:08x}", u32::from_le_bytes(rand_bytes));
-                let socket_path = format!("/tmp/multistack-{}-{}.sock", id, rand_suffix);
-                let args = ["--parallel", "--status-socket", &socket_path];
-                match spawn_process(
-                    pty_system,
-                    next_id,
-                    "zerostack",
-                    &args,
-                    None,
-                    term_rows,
-                    term_cols,
-                    Some(&socket_path),
-                ) {
-                    Ok(proc) => {
-                        if processes.is_empty() {
-                            *selected = 0;
-                        }
-                        let pid = proc.id;
-                        processes.push(proc);
-                        *mode = Mode::Tty { process_id: pid };
-                    }
-                    Err(e) => {
-                        let _ = notify_rust::Notification::new()
-                            .summary("Failed to spawn agent")
-                            .body(&format!("Could not launch zerostack: {e}"))
-                            .show();
+        Mode::Normal { selected } => {
+            match key.code {
+                KeyCode::Char('n') => {
+                    if let Some(project_id) = resolve_project(entries, *selected) {
+                        *mode = Mode::Prompt {
+                            purpose: crate::PromptPurpose::NewProcess(project_id),
+                            selected: *selected,
+                            input: String::new(),
+                        };
                     }
                 }
-            }
-            KeyCode::Char('r') => {
-                if !processes.is_empty() && *selected < processes.len() {
-                    let pid = processes[*selected].id;
-                    let default = processes[*selected].name.clone();
+                KeyCode::Char('N') => {
+                    if let Some(project_id) = resolve_project(entries, *selected)
+                        && let Some(dir) = find_project_dir(projects, project_id)
+                    {
+                        let new_selected = *selected;
+                        spawn_zerostack(
+                            pty_system, next_id, processes, project_id, &dir, None, term_rows,
+                            term_cols, selected,
+                        );
+                        if let Some(proc) = processes.last() {
+                            let pid = proc.id;
+                            *selected = new_selected;
+                            *mode = Mode::Tty { process_id: pid };
+                        }
+                    }
+                }
+                KeyCode::Char('p') => {
                     *mode = Mode::Prompt {
-                        purpose: PromptPurpose::Rename(pid),
+                        purpose: crate::PromptPurpose::NewProject,
                         selected: *selected,
-                        input: default,
+                        input: String::new(),
                     };
                 }
-            }
-            KeyCode::Char('k') => {
-                if !processes.is_empty() && *selected < processes.len() {
-                    processes.remove(*selected);
-                    if *selected >= processes.len() && *selected > 0 {
+                KeyCode::Char('l') => {
+                    if let Some(project_id) = resolve_project(entries, *selected) {
+                        let header_idx = entries[..=*selected]
+                        .iter()
+                        .rposition(|e| matches!(e, ListEntry::ProjectHeader(pid) if *pid == project_id))
+                        .unwrap_or(0);
+                        processes.retain(|p| p.project_id != project_id);
+                        projects.retain(|p| p.id != project_id);
+                        *selected = header_idx.saturating_sub(1);
+                    }
+                }
+                KeyCode::Char('r') => {
+                    if is_agent(entries, *selected)
+                        && let ListEntry::Agent(proc_id) = entries[*selected]
+                        && let Some(proc) = processes.iter().find(|p| p.id == proc_id)
+                    {
+                        let default = proc.name.clone();
+                        *mode = Mode::Prompt {
+                            purpose: crate::PromptPurpose::Rename(proc_id),
+                            selected: *selected,
+                            input: default,
+                        };
+                    }
+                }
+                KeyCode::Char('d') => {
+                    if is_agent(entries, *selected)
+                        && let ListEntry::Agent(proc_id) = entries[*selected]
+                    {
+                        processes.retain(|p| p.id != proc_id);
+                        if *selected > 0 {
+                            *selected -= 1;
+                        }
+                    }
+                }
+                KeyCode::Enter => {
+                    if is_agent(entries, *selected)
+                        && let ListEntry::Agent(proc_id) = entries[*selected]
+                    {
+                        *mode = Mode::Tty {
+                            process_id: proc_id,
+                        };
+                    }
+                }
+                KeyCode::Up => {
+                    if *selected > 0 {
                         *selected -= 1;
                     }
                 }
-            }
-            KeyCode::Enter => {
-                if !processes.is_empty() && *selected < processes.len() {
-                    let pid = processes[*selected].id;
-                    *mode = Mode::Tty { process_id: pid };
+                KeyCode::Down => {
+                    if *selected + 1 < entries.len() {
+                        *selected += 1;
+                    }
                 }
-            }
-            KeyCode::Up => {
-                if *selected > 0 {
-                    *selected -= 1;
+                KeyCode::PageUp => {
+                    if let Some(idx) = entries[..*selected]
+                        .iter()
+                        .rposition(|e| matches!(e, ListEntry::ProjectHeader(_)))
+                    {
+                        *selected = idx;
+                    }
                 }
-            }
-            KeyCode::Down => {
-                if *selected + 1 < processes.len() {
-                    *selected += 1;
+                KeyCode::PageDown => {
+                    let start = (*selected + 1).min(entries.len());
+                    if let Some(idx) = entries[start..]
+                        .iter()
+                        .position(|e| matches!(e, ListEntry::ProjectHeader(_)))
+                    {
+                        *selected = start + idx;
+                    }
                 }
+                KeyCode::Esc | KeyCode::Char('q') => return Ok(true),
+                _ => {}
             }
-            KeyCode::Esc | KeyCode::Char('q') => return Ok(true),
-            _ => {}
-        },
+        }
         Mode::Tty { process_id } => {
             let pid = *process_id;
             match key.code {
@@ -166,44 +264,48 @@ fn process_key(
                 let title = std::mem::take(input);
                 let title = title.trim().to_string();
                 match purpose {
-                    PromptPurpose::NewProcess => {
-                        let title_opt = if title.is_empty() {
-                            None
-                        } else {
-                            Some(title.as_str())
-                        };
-                        let id = *next_id;
-                        let mut rand_bytes = [0u8; 4];
-                        let _ = std::fs::File::open("/dev/urandom")
-                            .and_then(|mut f| f.read_exact(&mut rand_bytes));
-                        let rand_suffix = format!("{:08x}", u32::from_le_bytes(rand_bytes));
-                        let socket_path = format!("/tmp/multistack-{}-{}.sock", id, rand_suffix);
-                        let args = ["--parallel", "--status-socket", &socket_path];
-                        match spawn_process(
-                            pty_system,
-                            next_id,
-                            "zerostack",
-                            &args,
-                            title_opt,
-                            term_rows,
-                            term_cols,
-                            Some(&socket_path),
-                        ) {
-                            Ok(proc) => {
-                                if processes.is_empty() {
-                                    *selected = 0;
-                                }
-                                processes.push(proc);
-                            }
-                            Err(e) => {
+                    crate::PromptPurpose::NewProcess(project_id) => {
+                        let pid = *project_id;
+                        if let Some(dir) = find_project_dir(projects, pid) {
+                            let title_opt = if title.is_empty() {
+                                None
+                            } else {
+                                Some(title.as_str())
+                            };
+                            spawn_zerostack(
+                                pty_system, next_id, processes, pid, &dir, title_opt, term_rows,
+                                term_cols, selected,
+                            );
+                        }
+                    }
+                    crate::PromptPurpose::NewProject => {
+                        if !title.is_empty() {
+                            let path = Path::new(&title);
+                            if path.is_dir() {
+                                let name = path
+                                    .file_name()
+                                    .and_then(|n| n.to_str())
+                                    .unwrap_or(&title)
+                                    .to_string();
+                                let dir = path
+                                    .canonicalize()
+                                    .map(|p| p.to_string_lossy().to_string())
+                                    .unwrap_or_else(|_| title.to_string());
+                                projects.push(Project {
+                                    id: *next_project_id,
+                                    name,
+                                    directory: dir,
+                                });
+                                *next_project_id += 1;
+                            } else {
                                 let _ = notify_rust::Notification::new()
-                                    .summary("Failed to spawn agent")
-                                    .body(&format!("Could not launch zerostack: {e}"))
+                                    .summary("Invalid directory")
+                                    .body(&format!("Directory does not exist: {}", title))
                                     .show();
                             }
                         }
                     }
-                    PromptPurpose::Rename(pid) => {
+                    crate::PromptPurpose::Rename(pid) => {
                         if !title.is_empty()
                             && let Some(proc) = processes.iter_mut().find(|p| p.id == *pid)
                         {

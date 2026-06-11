@@ -10,27 +10,39 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState};
 
 use crate::Mode;
-use crate::PromptPurpose;
 use crate::process::Process;
+use crate::project::{ListEntry, Project};
 use crate::status;
 
+#[allow(clippy::too_many_arguments)]
 pub fn render(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     mode: &Mode,
+    entries: &[ListEntry],
+    projects: &[Project],
     processes: &[Process],
     rows: u16,
     cols: u16,
     confirm_quit: bool,
 ) -> std::io::Result<()> {
     match mode {
-        Mode::Normal { selected } => {
-            render_normal(terminal, processes, *selected, rows, cols, confirm_quit)
-        }
+        Mode::Normal { selected } => render_normal(
+            terminal,
+            entries,
+            projects,
+            processes,
+            *selected,
+            rows,
+            cols,
+            confirm_quit,
+        ),
         Mode::Prompt {
             purpose,
             selected,
             input,
-        } => render_prompt(terminal, processes, *selected, purpose, input, rows, cols),
+        } => render_prompt(
+            terminal, entries, projects, processes, *selected, purpose, input, rows, cols,
+        ),
         Mode::Tty { process_id } => {
             if let Some(proc) = processes.iter().find(|p| p.id == *process_id) {
                 render_tty(terminal, proc, rows, cols)
@@ -41,8 +53,32 @@ pub fn render(
     }
 }
 
+fn find_process(processes: &[Process], id: usize) -> Option<&Process> {
+    processes.iter().find(|p| p.id == id)
+}
+
+fn find_project(projects: &[Project], id: usize) -> Option<&Project> {
+    projects.iter().find(|p| p.id == id)
+}
+
+fn process_item(proc: &Process) -> ListItem<'static> {
+    let status_val = proc.status.load(Ordering::SeqCst);
+    let prefix = status::status_prefix(status_val);
+    let color = status::status_color(status_val);
+    let cycle = proc.cycle_start.lock();
+    let timer = status::format_timer(proc.active_ms.load(Ordering::SeqCst), &cycle);
+    let line = Line::from(Span::styled(
+        format!("  {} {}  {}", prefix, proc.name, timer),
+        Style::default().fg(color),
+    ));
+    ListItem::new(line)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn render_normal(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    entries: &[ListEntry],
+    projects: &[Project],
     processes: &[Process],
     selected: usize,
     _rows: u16,
@@ -69,23 +105,31 @@ fn render_normal(
         let sep = Line::from("═".repeat(sep_width));
         frame.render_widget(sep.centered(), sep_area);
 
-        if processes.is_empty() {
+        if entries.is_empty() {
             let empty = Line::from("  (no processes)");
             frame.render_widget(empty, list_area);
         } else {
-            let items: Vec<ListItem> = processes
+            let header_style = Style::default().add_modifier(Modifier::DIM);
+            let items: Vec<ListItem> = entries
                 .iter()
-                .map(|p| {
-                    let status_val = p.status.load(Ordering::SeqCst);
-                    let prefix = status::status_prefix(status_val);
-                    let color = status::status_color(status_val);
-                    let cycle = p.cycle_start.lock();
-                    let timer = status::format_timer(p.active_ms.load(Ordering::SeqCst), &cycle);
-                    let line = Line::from(Span::styled(
-                        format!("{} {}  {}", prefix, p.name, timer),
-                        Style::default().fg(color),
-                    ));
-                    ListItem::new(line)
+                .map(|e| match e {
+                    ListEntry::ProjectHeader(pid) => {
+                        let proj = find_project(projects, *pid);
+                        let name = proj.map(|p| p.name.as_str()).unwrap_or("?");
+                        let dir = proj.map(|p| p.directory.as_str()).unwrap_or("?");
+                        let line = Line::from(Span::styled(
+                            format!("\u{2500}\u{2500} Project: {} ({}) \u{2500}\u{2500}", name, dir),
+                            header_style,
+                        ));
+                        ListItem::new(line)
+                    }
+                    ListEntry::Agent(proc_id) => {
+                        if let Some(proc) = find_process(processes, *proc_id) {
+                            process_item(proc)
+                        } else {
+                            ListItem::new("")
+                        }
+                    }
                 })
                 .collect();
 
@@ -99,20 +143,23 @@ fn render_normal(
         let help = if confirm_quit {
             Line::from("Press q again to quit")
         } else if cols < 40 {
-            Line::from("n:new N:go r:ren k:kill Enter:TTY q:quit")
+            Line::from("n:new N:go r:ren d:kill l:rmprj p:newprj Enter:TTY q:quit")
         } else {
-            Line::from("n: new  N: spawn & enter  r: rename  k: kill  Enter: TTY  q/Esc: quit")
+            Line::from("n: new  N: spawn & enter  r: rename  d: kill  p: new project  l: rm project  Enter: TTY  q/Esc: quit")
         };
         frame.render_widget(help, help_area);
     })?;
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_prompt(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    entries: &[ListEntry],
+    projects: &[Project],
     processes: &[Process],
     selected: usize,
-    purpose: &PromptPurpose,
+    purpose: &crate::PromptPurpose,
     input: &str,
     _rows: u16,
     cols: u16,
@@ -137,23 +184,34 @@ fn render_prompt(
         let sep = Line::from("═".repeat(sep_width));
         frame.render_widget(sep.centered(), sep_area);
 
-        if processes.is_empty() {
+        if entries.is_empty() {
             let empty = Line::from("  (no processes)");
             frame.render_widget(empty, list_area);
         } else {
-            let items: Vec<ListItem> = processes
+            let header_style = Style::default().add_modifier(Modifier::DIM);
+            let items: Vec<ListItem> = entries
                 .iter()
-                .map(|p| {
-                    let status_val = p.status.load(Ordering::SeqCst);
-                    let prefix = status::status_prefix(status_val);
-                    let color = status::status_color(status_val);
-                    let cycle = p.cycle_start.lock();
-                    let timer = status::format_timer(p.active_ms.load(Ordering::SeqCst), &cycle);
-                    let line = Line::from(Span::styled(
-                        format!("{} {}  {}", prefix, p.name, timer),
-                        Style::default().fg(color),
-                    ));
-                    ListItem::new(line)
+                .map(|e| match e {
+                    ListEntry::ProjectHeader(pid) => {
+                        let proj = find_project(projects, *pid);
+                        let name = proj.map(|p| p.name.as_str()).unwrap_or("?");
+                        let dir = proj.map(|p| p.directory.as_str()).unwrap_or("?");
+                        let line = Line::from(Span::styled(
+                            format!(
+                                "\u{2500}\u{2500} Project: {} ({}) \u{2500}\u{2500}",
+                                name, dir
+                            ),
+                            header_style,
+                        ));
+                        ListItem::new(line)
+                    }
+                    ListEntry::Agent(proc_id) => {
+                        if let Some(proc) = find_process(processes, *proc_id) {
+                            process_item(proc)
+                        } else {
+                            ListItem::new("")
+                        }
+                    }
                 })
                 .collect();
 
@@ -165,8 +223,9 @@ fn render_prompt(
         }
 
         let label = match purpose {
-            PromptPurpose::NewProcess => "new name: ",
-            PromptPurpose::Rename(_) => "rename: ",
+            crate::PromptPurpose::NewProcess(_) => "new name: ",
+            crate::PromptPurpose::NewProject => "project dir: ",
+            crate::PromptPurpose::Rename(_) => "rename: ",
         };
         let help = Line::from(format!("{}{}_", label, input));
         frame.render_widget(help, help_area);

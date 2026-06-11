@@ -13,6 +13,7 @@ use crate::status;
 
 pub struct Process {
     pub id: usize,
+    pub project_id: usize,
     pub name: String,
     pub child: Option<Box<dyn portable_pty::Child + Send>>,
     pub master: Option<Box<dyn portable_pty::MasterPty + Send>>,
@@ -46,7 +47,7 @@ impl Drop for Process {
     }
 }
 
-pub fn check_tty_alive(mode: &mut Mode, processes: &mut Vec<Process>) -> bool {
+pub fn check_tty_alive(mode: &Mode, processes: &mut Vec<Process>) -> Option<usize> {
     if let Mode::Tty { process_id } = mode {
         let pid = *process_id;
         let alive = processes
@@ -54,38 +55,28 @@ pub fn check_tty_alive(mode: &mut Mode, processes: &mut Vec<Process>) -> bool {
             .find(|p| p.id == pid)
             .map(|p| p.alive.load(Ordering::SeqCst));
         match alive {
-            Some(false) => {
-                let idx = processes.iter().position(|p| p.id == pid).unwrap_or(0);
+            Some(false) | None => {
                 processes.retain(|p| p.id != pid);
-                let selected = if processes.is_empty() {
-                    0
-                } else {
-                    idx.min(processes.len() - 1)
-                };
-                *mode = Mode::Normal { selected };
-                return true;
-            }
-            None => {
-                let selected = 0;
-                *mode = Mode::Normal { selected };
-                return true;
+                return Some(pid);
             }
             _ => {}
         }
     }
-    false
+    None
 }
 
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_process(
     pty_system: &NativePtySystem,
     next_id: &mut usize,
+    project_id: usize,
     cmd: &str,
     args: &[&str],
     title: Option<&str>,
     rows: u16,
     cols: u16,
     status_socket: Option<&str>,
+    cwd: &str,
 ) -> std::io::Result<Process> {
     let id = *next_id;
     *next_id += 1;
@@ -103,9 +94,7 @@ pub fn spawn_process(
     for arg in args {
         cmd_builder.arg(arg);
     }
-    if let Ok(cwd) = std::env::current_dir() {
-        cmd_builder.cwd(cwd);
-    }
+    cmd_builder.cwd(cwd);
     let child = pair
         .slave
         .spawn_command(cmd_builder)
@@ -165,6 +154,7 @@ pub fn spawn_process(
 
     Ok(Process {
         id,
+        project_id,
         name,
         child: Some(child),
         master: Some(pair.master),
@@ -228,6 +218,7 @@ mod tests {
         };
         Process {
             id: 1,
+            project_id: 1,
             name: "test [1]".into(),
             child: None,
             master: None,
