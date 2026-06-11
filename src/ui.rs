@@ -7,7 +7,8 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{List, ListItem, ListState};
+use ratatui::widgets::{FrameExt, List, ListItem, ListState};
+use ratatui_explorer::FileExplorer;
 
 use crate::Mode;
 use crate::process::Process;
@@ -51,6 +52,7 @@ pub fn render(
             }
         }
         Mode::TempTty { process, .. } => render_tty(terminal, process, rows, cols),
+        Mode::DirPicker { explorer, .. } => render_dirpicker(terminal, explorer, rows, cols),
     }
 }
 
@@ -253,5 +255,37 @@ fn render_tty(
     stdout.write_all(&contents)?;
     execute!(stdout, cursor::MoveTo(cursor_col, cursor_row))?;
     stdout.flush()?;
+    Ok(())
+}
+
+fn render_dirpicker(
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    explorer: &FileExplorer,
+    _rows: u16,
+    cols: u16,
+) -> std::io::Result<()> {
+    terminal.draw(|frame| {
+        let layout = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Fill(1),
+            Constraint::Length(1),
+        ]);
+        let [title_area, explorer_area, help_area] = frame.area().layout(&layout);
+
+        let title = Line::from(vec![Span::styled(
+            "Select project directory",
+            Style::default().add_modifier(Modifier::BOLD),
+        )]);
+        frame.render_widget(title.centered(), title_area);
+
+        frame.render_widget_ref(explorer.widget(), explorer_area);
+
+        let help = if cols < 40 {
+            Line::from("Enter:pick Esc:cancel arrows:nav h:toggle hidden")
+        } else {
+            Line::from("Enter: pick directory  Esc: cancel  \u{2191}\u{2193}\u{2190}\u{2192}: navigate  Ctrl+h: toggle hidden")
+        };
+        frame.render_widget(help, help_area);
+    })?;
     Ok(())
 }

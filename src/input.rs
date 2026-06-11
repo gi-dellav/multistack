@@ -4,6 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use portable_pty::{NativePtySystem, PtySize};
+use ratatui_explorer::{FileExplorerBuilder, Theme};
 
 use crate::Mode;
 use crate::process::{Process, resize_parsers, spawn_process, spawn_pty};
@@ -176,11 +177,21 @@ fn process_key(
                     }
                 }
                 KeyCode::Char('p') => {
-                    *mode = Mode::Prompt {
-                        purpose: crate::PromptPurpose::NewProject,
-                        selected: *selected,
-                        input: String::new(),
-                    };
+                    let theme = Theme::default().add_default_title();
+                    match FileExplorerBuilder::build_with_theme(theme) {
+                        Ok(explorer) => {
+                            *mode = Mode::DirPicker {
+                                explorer: Box::new(explorer),
+                                previous_selected: *selected,
+                            };
+                        }
+                        Err(e) => {
+                            let _ = notify_rust::Notification::new()
+                                .summary("Failed to open file explorer")
+                                .body(&format!("{e}"))
+                                .show();
+                        }
+                    }
                 }
                 KeyCode::Char('l') => {
                     if let Some(project_id) = resolve_project(entries, projects, *selected) {
@@ -467,6 +478,49 @@ fn process_key(
             }
             _ => {}
         },
+        Mode::DirPicker {
+            explorer,
+            previous_selected,
+        } => {
+            match key.code {
+                KeyCode::Esc => {
+                    *mode = Mode::Normal {
+                        selected: *previous_selected,
+                    };
+                }
+                KeyCode::Enter => {
+                    let current = explorer.current();
+                    let (name, dir) = if current.is_dir {
+                        let path = &current.path;
+                        let canonical = path
+                            .canonicalize()
+                            .map(|p| p.to_string_lossy().to_string())
+                            .unwrap_or_else(|_| path.to_string_lossy().to_string());
+                        let name = path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or(&canonical)
+                            .to_string();
+                        (name, canonical)
+                    } else {
+                        return Ok(false);
+                    };
+                    projects.push(Project {
+                        id: *next_project_id,
+                        name,
+                        directory: dir,
+                    });
+                    *next_project_id += 1;
+                    *mode = Mode::Normal {
+                        selected: *previous_selected,
+                    };
+                }
+                _ => {
+                    let event = Event::Key(key);
+                    let _ = explorer.handle(&event);
+                }
+            }
+        }
     }
     Ok(false)
 }

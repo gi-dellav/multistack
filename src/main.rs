@@ -17,6 +17,7 @@ use crossterm::{
 use futures::StreamExt;
 use portable_pty::NativePtySystem;
 use ratatui::{Terminal, backend::CrosstermBackend};
+use ratatui_explorer::FileExplorer;
 
 use input::process_event;
 use process::{Process, check_tty_alive, sync_statuses};
@@ -44,6 +45,10 @@ enum Mode {
         purpose: PromptPurpose,
         selected: usize,
         input: String,
+    },
+    DirPicker {
+        explorer: Box<FileExplorer>,
+        previous_selected: usize,
     },
 }
 
