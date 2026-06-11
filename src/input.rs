@@ -395,6 +395,11 @@ fn process_key(
                     crate::PromptPurpose::NewProcess(project_id) => {
                         let pid = *project_id;
                         if let Some(dir) = find_project_dir(projects, pid) {
+                            let display = if title.is_empty() {
+                                "agent".to_string()
+                            } else {
+                                title.clone()
+                            };
                             let wt_name = if title.is_empty() {
                                 worktree_name("agent")
                             } else {
@@ -406,7 +411,7 @@ fn process_key(
                                 processes,
                                 pid,
                                 &dir,
-                                Some(wt_name.as_str()),
+                                Some(&display),
                                 Some(wt_name.as_str()),
                                 term_rows,
                                 term_cols,
