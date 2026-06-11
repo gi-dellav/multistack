@@ -48,39 +48,44 @@ impl Drop for Process {
 }
 
 pub fn check_tty_alive(mode: &Mode, processes: &mut Vec<Process>) -> Option<usize> {
-    if let Mode::Tty { process_id } = mode {
-        let pid = *process_id;
-        let alive = processes
-            .iter()
-            .find(|p| p.id == pid)
-            .map(|p| p.alive.load(Ordering::SeqCst));
-        match alive {
-            Some(false) | None => {
-                processes.retain(|p| p.id != pid);
-                return Some(pid);
+    match mode {
+        Mode::Tty { process_id } => {
+            let pid = *process_id;
+            let alive = processes
+                .iter()
+                .find(|p| p.id == pid)
+                .map(|p| p.alive.load(Ordering::SeqCst));
+            match alive {
+                Some(false) | None => {
+                    processes.retain(|p| p.id != pid);
+                    Some(0)
+                }
+                _ => None,
             }
-            _ => {}
         }
+        Mode::TempTty {
+            process,
+            previous_selected,
+        } => {
+            if !process.alive.load(Ordering::SeqCst) {
+                Some(*previous_selected)
+            } else {
+                None
+            }
+        }
+        _ => None,
     }
-    None
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn spawn_process(
+pub fn spawn_pty(
     pty_system: &NativePtySystem,
-    next_id: &mut usize,
-    project_id: usize,
     cmd: &str,
     args: &[&str],
     title: Option<&str>,
     rows: u16,
     cols: u16,
-    status_socket: Option<&str>,
     cwd: &str,
 ) -> std::io::Result<Process> {
-    let id = *next_id;
-    *next_id += 1;
-
     let pair = pty_system
         .openpty(PtySize {
             rows,
@@ -136,38 +141,62 @@ pub fn spawn_process(
         format!("{} {}", cmd, args.join(" "))
     };
 
-    let status = Arc::new(AtomicU8::new(status::STATUS_NOT_YET));
-    let active_ms = Arc::new(AtomicU64::new(0));
-    let cycle_start = Arc::new(Mutex::new(None));
-    let (status_socket_path, shutdown_flag, listener_thread) = if let Some(path) = status_socket {
-        let (flag, handle) = status::spawn_status_listener(
-            status.clone(),
-            active_ms.clone(),
-            cycle_start.clone(),
-            path.to_string(),
-            name.clone(),
-        );
-        (Some(path.to_string()), Some(flag), Some(handle))
-    } else {
-        (None, None, None)
-    };
-
     Ok(Process {
-        id,
-        project_id,
+        id: 0,
+        project_id: 0,
         name,
         child: Some(child),
         master: Some(pair.master),
         master_writer: Some(writer),
         parser,
         alive,
-        status,
-        active_ms,
-        cycle_start,
-        status_socket_path,
-        shutdown_flag,
-        listener_thread,
+        status: Arc::new(AtomicU8::new(status::STATUS_NOT_YET)),
+        active_ms: Arc::new(AtomicU64::new(0)),
+        cycle_start: Arc::new(Mutex::new(None)),
+        status_socket_path: None,
+        shutdown_flag: None,
+        listener_thread: None,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_process(
+    pty_system: &NativePtySystem,
+    next_id: &mut usize,
+    project_id: usize,
+    cmd: &str,
+    args: &[&str],
+    title: Option<&str>,
+    rows: u16,
+    cols: u16,
+    status_socket: Option<&str>,
+    cwd: &str,
+) -> std::io::Result<Process> {
+    let id = *next_id;
+    *next_id += 1;
+
+    let mut proc = spawn_pty(pty_system, cmd, args, title, rows, cols, cwd)?;
+    proc.id = id;
+    proc.project_id = project_id;
+
+    let (status_socket_path, shutdown_flag, listener_thread) = if let Some(path) = status_socket {
+        let (flag, handle) = status::spawn_status_listener(
+            proc.status.clone(),
+            proc.active_ms.clone(),
+            proc.cycle_start.clone(),
+            path.to_string(),
+            proc.name.clone(),
+        );
+        (Some(path.to_string()), Some(flag), Some(handle))
+    } else {
+        (None, None, None)
+    };
+
+    proc.status_socket_path = status_socket_path;
+    proc.shutdown_flag = shutdown_flag;
+    proc.listener_thread = listener_thread;
+
+    Ok(proc)
 }
 
 pub fn resize_parsers(processes: &mut [Process], rows: u16, cols: u16) {

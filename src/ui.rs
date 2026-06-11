@@ -50,6 +50,7 @@ pub fn render(
                 Ok(())
             }
         }
+        Mode::TempTty { process, .. } => render_tty(terminal, process, rows, cols),
     }
 }
 
@@ -143,9 +144,9 @@ fn render_normal(
         let help = if confirm_quit {
             Line::from("Press q again to quit")
         } else if cols < 40 {
-            Line::from("n:new N:go r:ren d:kill l:rmprj p:newprj Enter:TTY q:quit")
+            Line::from("n:new N:go r:ren d:kill h:lg s:sh l:rmprj p:newprj Enter:TTY q:quit")
         } else {
-            Line::from("n: new  N: spawn & enter  r: rename  d: kill  p: new project  l: rm project  Enter: TTY  q/Esc: quit")
+            Line::from("n: new  N: spawn & enter  r: rename  d: kill  h: lazygit  s: shell  p: new project  l: rm project  Enter: TTY  q/Esc: quit")
         };
         frame.render_widget(help, help_area);
     })?;

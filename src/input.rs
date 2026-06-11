@@ -1,11 +1,12 @@
 use std::io::Read;
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use portable_pty::{NativePtySystem, PtySize};
 
 use crate::Mode;
-use crate::process::{Process, resize_parsers, spawn_process};
+use crate::process::{Process, resize_parsers, spawn_process, spawn_pty};
 use crate::project::{ListEntry, Project, is_agent, resolve_project};
 
 #[allow(clippy::too_many_arguments)]
@@ -71,6 +72,7 @@ fn spawn_zerostack(
     project_id: usize,
     project_dir: &str,
     title: Option<&str>,
+    worktree: Option<&str>,
     term_rows: u16,
     term_cols: u16,
     selected: &mut usize,
@@ -80,7 +82,11 @@ fn spawn_zerostack(
     let _ = std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut rand_bytes));
     let rand_suffix = format!("{:08x}", u32::from_le_bytes(rand_bytes));
     let socket_path = format!("/tmp/multistack-{}-{}.sock", id, rand_suffix);
-    let args = ["--parallel", "--status-socket", &socket_path];
+    let args: Vec<&str> = if let Some(wt) = worktree {
+        vec!["--worktree", wt, "--status-socket", &socket_path]
+    } else {
+        vec!["--parallel", "--status-socket", &socket_path]
+    };
     match spawn_process(
         pty_system,
         next_id,
@@ -106,6 +112,26 @@ fn spawn_zerostack(
                 .show();
         }
     }
+}
+
+fn worktree_name(title: &str) -> String {
+    let sanitized = title.trim().replace([' ', '/', '\\'], "_");
+    let dur = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = dur.as_secs();
+    let h = (secs / 3600) % 24;
+    let m = (secs / 60) % 60;
+    let s = secs % 60;
+    format!("wt-{}-{:02}-{:02}-{:02}", sanitized, h, m, s)
+}
+
+fn worktree_dir(project_dir: &str, wt_name: &str) -> String {
+    let parent = Path::new(project_dir)
+        .parent()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| ".".to_string());
+    format!("{}/{}", parent, wt_name)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -139,8 +165,8 @@ fn process_key(
                     {
                         let new_selected = *selected;
                         spawn_zerostack(
-                            pty_system, next_id, processes, project_id, &dir, None, term_rows,
-                            term_cols, selected,
+                            pty_system, next_id, processes, project_id, &dir, None, None,
+                            term_rows, term_cols, selected,
                         );
                         if let Some(proc) = processes.last() {
                             let pid = proc.id;
@@ -165,6 +191,89 @@ fn process_key(
                         processes.retain(|p| p.project_id != project_id);
                         projects.retain(|p| p.id != project_id);
                         *selected = header_idx.saturating_sub(1);
+                    }
+                }
+                KeyCode::Char('h') => {
+                    if let Some(project_id) = resolve_project(entries, projects, *selected)
+                        && let Some(dir) = find_project_dir(projects, project_id)
+                    {
+                        let target_dir = if is_agent(entries, *selected)
+                            && let ListEntry::Agent(proc_id) = entries[*selected]
+                            && let Some(proc) = processes.iter().find(|p| p.id == proc_id)
+                        {
+                            let wt_dir = worktree_dir(&dir, &proc.name);
+                            if Path::new(&wt_dir).is_dir() {
+                                wt_dir
+                            } else {
+                                dir
+                            }
+                        } else {
+                            dir
+                        };
+                        match spawn_pty(
+                            pty_system,
+                            "lazygit",
+                            &[],
+                            None,
+                            term_rows,
+                            term_cols,
+                            &target_dir,
+                        ) {
+                            Ok(process) => {
+                                *mode = Mode::TempTty {
+                                    process,
+                                    previous_selected: *selected,
+                                };
+                            }
+                            Err(e) => {
+                                let _ = notify_rust::Notification::new()
+                                    .summary("Failed to launch lazygit")
+                                    .body(&format!("{e}"))
+                                    .show();
+                            }
+                        }
+                    }
+                }
+                KeyCode::Char('s') => {
+                    if let Some(project_id) = resolve_project(entries, projects, *selected)
+                        && let Some(dir) = find_project_dir(projects, project_id)
+                    {
+                        let target_dir = if is_agent(entries, *selected)
+                            && let ListEntry::Agent(proc_id) = entries[*selected]
+                            && let Some(proc) = processes.iter().find(|p| p.id == proc_id)
+                        {
+                            let wt_dir = worktree_dir(&dir, &proc.name);
+                            if Path::new(&wt_dir).is_dir() {
+                                wt_dir
+                            } else {
+                                dir
+                            }
+                        } else {
+                            dir
+                        };
+                        let shell = std::env::var("SHELL").unwrap_or_else(|_| "bash".to_string());
+                        match spawn_pty(
+                            pty_system,
+                            &shell,
+                            &[],
+                            None,
+                            term_rows,
+                            term_cols,
+                            &target_dir,
+                        ) {
+                            Ok(process) => {
+                                *mode = Mode::TempTty {
+                                    process,
+                                    previous_selected: *selected,
+                                };
+                            }
+                            Err(e) => {
+                                let _ = notify_rust::Notification::new()
+                                    .summary("Failed to launch shell")
+                                    .body(&format!("{e}"))
+                                    .show();
+                            }
+                        }
                     }
                 }
                 KeyCode::Char('r') => {
@@ -250,6 +359,25 @@ fn process_key(
                 }
             }
         }
+        Mode::TempTty {
+            process,
+            previous_selected,
+        } => match key.code {
+            KeyCode::Esc => {
+                *mode = Mode::Normal {
+                    selected: *previous_selected,
+                };
+            }
+            _ => {
+                if let Some(ref mut writer) = process.master_writer {
+                    let bytes = key_to_bytes(&key);
+                    if !bytes.is_empty() {
+                        let _ = writer.write_all(&bytes);
+                        let _ = writer.flush();
+                    }
+                }
+            }
+        },
         Mode::Prompt {
             purpose,
             selected,
@@ -267,14 +395,22 @@ fn process_key(
                     crate::PromptPurpose::NewProcess(project_id) => {
                         let pid = *project_id;
                         if let Some(dir) = find_project_dir(projects, pid) {
-                            let title_opt = if title.is_empty() {
-                                None
+                            let wt_name = if title.is_empty() {
+                                worktree_name("agent")
                             } else {
-                                Some(title.as_str())
+                                worktree_name(&title)
                             };
                             spawn_zerostack(
-                                pty_system, next_id, processes, pid, &dir, title_opt, term_rows,
-                                term_cols, selected,
+                                pty_system,
+                                next_id,
+                                processes,
+                                pid,
+                                &dir,
+                                Some(wt_name.as_str()),
+                                Some(wt_name.as_str()),
+                                term_rows,
+                                term_cols,
+                                selected,
                             );
                         }
                     }

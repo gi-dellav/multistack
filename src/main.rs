@@ -36,6 +36,10 @@ enum Mode {
     Tty {
         process_id: usize,
     },
+    TempTty {
+        process: Process,
+        previous_selected: usize,
+    },
     Prompt {
         purpose: PromptPurpose,
         selected: usize,
@@ -88,10 +92,12 @@ async fn run() -> std::io::Result<()> {
     render_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
-        let was_tty = matches!(mode, Mode::Tty { .. });
+        let was_tty = matches!(mode, Mode::Tty { .. } | Mode::TempTty { .. });
 
-        if let Some(_dead_pid) = check_tty_alive(&mode, &mut processes) {
-            mode = Mode::Normal { selected: 0 };
+        if let Some(restore_selected) = check_tty_alive(&mode, &mut processes) {
+            mode = Mode::Normal {
+                selected: restore_selected,
+            };
             if was_tty {
                 suppress_quit = true;
             }
@@ -118,7 +124,7 @@ async fn run() -> std::io::Result<()> {
             maybe_event = reader.next() => {
                 match maybe_event {
                     Some(Ok(event)) => {
-                        let was_tty_before_event = matches!(mode, Mode::Tty { .. });
+                        let was_tty_before_event = matches!(mode, Mode::Tty { .. } | Mode::TempTty { .. });
 
                         let should_quit = process_event(
                             &mut mode,
