@@ -60,6 +60,40 @@ fn process_key(
                     input: String::new(),
                 };
             }
+            KeyCode::Char('N') => {
+                let id = *next_id;
+                let mut rand_bytes = [0u8; 4];
+                let _ = std::fs::File::open("/dev/urandom")
+                    .and_then(|mut f| f.read_exact(&mut rand_bytes));
+                let rand_suffix = format!("{:08x}", u32::from_le_bytes(rand_bytes));
+                let socket_path = format!("/tmp/multistack-{}-{}.sock", id, rand_suffix);
+                let args = ["--parallel", "--status-socket", &socket_path];
+                match spawn_process(
+                    pty_system,
+                    next_id,
+                    "zerostack",
+                    &args,
+                    None,
+                    term_rows,
+                    term_cols,
+                    Some(&socket_path),
+                ) {
+                    Ok(proc) => {
+                        if processes.is_empty() {
+                            *selected = 0;
+                        }
+                        let pid = proc.id;
+                        processes.push(proc);
+                        *mode = Mode::Tty { process_id: pid };
+                    }
+                    Err(e) => {
+                        let _ = notify_rust::Notification::new()
+                            .summary("Failed to spawn agent")
+                            .body(&format!("Could not launch zerostack: {e}"))
+                            .show();
+                    }
+                }
+            }
             KeyCode::Char('r') => {
                 if !processes.is_empty() && *selected < processes.len() {
                     let pid = processes[*selected].id;
