@@ -20,9 +20,12 @@ pub fn render(
     processes: &[Process],
     rows: u16,
     cols: u16,
+    confirm_quit: bool,
 ) -> std::io::Result<()> {
     match mode {
-        Mode::Normal { selected } => render_normal(terminal, processes, *selected, rows, cols),
+        Mode::Normal { selected } => {
+            render_normal(terminal, processes, *selected, rows, cols, confirm_quit)
+        }
         Mode::Prompt {
             purpose,
             selected,
@@ -44,6 +47,7 @@ fn render_normal(
     selected: usize,
     _rows: u16,
     cols: u16,
+    confirm_quit: bool,
 ) -> std::io::Result<()> {
     terminal.draw(|frame| {
         let layout = Layout::vertical([
@@ -92,7 +96,9 @@ fn render_normal(
             frame.render_stateful_widget(list, list_area, &mut list_state);
         }
 
-        let help = if cols < 40 {
+        let help = if confirm_quit {
+            Line::from("Press q again to quit")
+        } else if cols < 40 {
             Line::from("n:new N:go r:ren k:kill Enter:TTY q:quit")
         } else {
             Line::from("n: new  N: spawn & enter  r: rename  k: kill  Enter: TTY  q/Esc: quit")
