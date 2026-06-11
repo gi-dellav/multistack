@@ -77,10 +77,10 @@ fn render_normal(
                     let color = status::status_color(status_val);
                     let cycle = p.cycle_start.lock();
                     let timer = status::format_timer(p.active_ms.load(Ordering::SeqCst), &cycle);
-                    let line = Line::from(vec![
-                        Span::styled(prefix.to_string(), Style::default().fg(color)),
-                        Span::from(format!(" {}  {}", p.name, timer)),
-                    ]);
+                    let line = Line::from(Span::styled(
+                        format!("{} {}  {}", prefix, p.name, timer),
+                        Style::default().fg(color),
+                    ));
                     ListItem::new(line)
                 })
                 .collect();
@@ -143,10 +143,10 @@ fn render_prompt(
                     let color = status::status_color(status_val);
                     let cycle = p.cycle_start.lock();
                     let timer = status::format_timer(p.active_ms.load(Ordering::SeqCst), &cycle);
-                    let line = Line::from(vec![
-                        Span::styled(prefix.to_string(), Style::default().fg(color)),
-                        Span::from(format!(" {}  {}", p.name, timer)),
-                    ]);
+                    let line = Line::from(Span::styled(
+                        format!("{} {}  {}", prefix, p.name, timer),
+                        Style::default().fg(color),
+                    ));
                     ListItem::new(line)
                 })
                 .collect();
