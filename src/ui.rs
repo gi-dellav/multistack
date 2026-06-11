@@ -93,9 +93,9 @@ fn render_normal(
         }
 
         let help = if cols < 40 {
-            Line::from("n:new r:ren k:kill Enter:TTY q:quit")
+            Line::from("n:new N:go r:ren k:kill Enter:TTY q:quit")
         } else {
-            Line::from("n: new  r: rename  k: kill  Enter: TTY  q/Esc: quit")
+            Line::from("n: new  N: spawn & enter  r: rename  k: kill  Enter: TTY  q/Esc: quit")
         };
         frame.render_widget(help, help_area);
     })?;

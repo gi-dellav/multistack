@@ -97,12 +97,7 @@ fn process_key(
             KeyCode::Char('r') => {
                 if !processes.is_empty() && *selected < processes.len() {
                     let pid = processes[*selected].id;
-                    let current = processes[*selected].name.clone();
-                    let suffix = format!(" [{}]", pid);
-                    let default = current
-                        .strip_suffix(&suffix)
-                        .unwrap_or(&current)
-                        .to_string();
+                    let default = processes[*selected].name.clone();
                     *mode = Mode::Prompt {
                         purpose: PromptPurpose::Rename(pid),
                         selected: *selected,
@@ -212,7 +207,7 @@ fn process_key(
                         if !title.is_empty()
                             && let Some(proc) = processes.iter_mut().find(|p| p.id == *pid)
                         {
-                            proc.name = format!("{} [{}]", title, pid);
+                            proc.name = title;
                         }
                     }
                 }

@@ -140,14 +140,11 @@ pub fn spawn_process(
     });
 
     let name = if let Some(title) = title {
-        format!("{} [{}]", title, id)
+        title.to_string()
+    } else if args.is_empty() {
+        cmd.to_string()
     } else {
-        let display = if args.is_empty() {
-            cmd.to_string()
-        } else {
-            format!("{} {}", cmd, args.join(" "))
-        };
-        format!("{} [{}]", display, id)
+        format!("{} {}", cmd, args.join(" "))
     };
 
     let status = Arc::new(AtomicU8::new(status::STATUS_NOT_YET));
