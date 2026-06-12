@@ -179,7 +179,8 @@ fn process_key(
                 KeyCode::Char('p') => {
                     let theme = Theme::default().add_default_title();
                     match FileExplorerBuilder::build_with_theme(theme) {
-                        Ok(explorer) => {
+                        Ok(mut explorer) => {
+                            let _ = explorer.set_only_dirs(true);
                             *mode = Mode::DirPicker {
                                 explorer: Box::new(explorer),
                                 previous_selected: *selected,
@@ -482,6 +483,35 @@ fn process_key(
             explorer,
             previous_selected,
         } => {
+            // Handle search typing if search is active
+            if explorer.search_query().is_some() {
+                match key.code {
+                    KeyCode::Esc => {
+                        let _ = explorer.set_search_query(None);
+                        return Ok(false);
+                    }
+                    KeyCode::Backspace => {
+                        let current = explorer.search_query().unwrap().clone();
+                        let mut chars: Vec<char> = current.chars().collect();
+                        chars.pop();
+                        if chars.is_empty() {
+                            let _ = explorer.set_search_query(None);
+                        } else {
+                            let _ = explorer
+                                .set_search_query(Some(chars.into_iter().collect()));
+                        }
+                        return Ok(false);
+                    }
+                    KeyCode::Char(c) if c != '/' => {
+                        let current = explorer.search_query().unwrap().clone();
+                        let _ = explorer
+                            .set_search_query(Some(format!("{}{}", current, c)));
+                        return Ok(false);
+                    }
+                    _ => {}
+                }
+            }
+
             match key.code {
                 KeyCode::Esc => {
                     *mode = Mode::Normal {

@@ -280,10 +280,16 @@ fn render_dirpicker(
 
         frame.render_widget_ref(explorer.widget(), explorer_area);
 
-        let help = if cols < 40 {
-            Line::from("Enter:pick Esc:cancel arrows:nav h:toggle hidden")
+        let help = if let Some(query) = explorer.search_query() {
+            if cols < 40 {
+                Line::from(format!("/{}", query))
+            } else {
+                Line::from(format!("/{}  Esc: clear search", query))
+            }
+        } else if cols < 40 {
+            Line::from("Enter:pick Esc:cancel arrows:nav /:search")
         } else {
-            Line::from("Enter: pick directory  Esc: cancel  \u{2191}\u{2193}\u{2190}\u{2192}: navigate  Ctrl+h: toggle hidden")
+            Line::from("Enter: pick directory  Esc: cancel  \u{2191}\u{2193}\u{2190}\u{2192}: navigate  /: search")
         };
         frame.render_widget(help, help_area);
     })?;
