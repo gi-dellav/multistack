@@ -12,6 +12,7 @@ pub const STATUS_NOT_YET: u8 = 0;
 pub const STATUS_WORKING: u8 = 1;
 pub const STATUS_FINISHED: u8 = 2;
 pub const STATUS_DEAD: u8 = 3;
+pub const STATUS_GIT_CONFLICT: u8 = 4;
 
 pub fn status_prefix(status: u8) -> &'static str {
     match status {
@@ -19,6 +20,7 @@ pub fn status_prefix(status: u8) -> &'static str {
         STATUS_WORKING => "[~]",
         STATUS_FINISHED => "[✓]",
         STATUS_DEAD => "[X]",
+        STATUS_GIT_CONFLICT => "[!]",
         _ => "[ ]",
     }
 }
@@ -30,6 +32,7 @@ pub fn status_color(status: u8) -> ratatui::style::Color {
         STATUS_WORKING => Color::Yellow,
         STATUS_FINISHED => Color::Green,
         STATUS_DEAD => Color::Red,
+        STATUS_GIT_CONFLICT => Color::Magenta,
         _ => Color::Gray,
     }
 }
@@ -99,6 +102,16 @@ pub fn spawn_status_listener(
                                         .show();
                                 }
                             }
+                            "git-conflict" => {
+                                status.store(STATUS_GIT_CONFLICT, Ordering::SeqCst);
+                                let _ = Notification::new()
+                                    .summary("Git conflict")
+                                    .body(&format!(
+                                        "{} needs your attention — resolve the Git conflict",
+                                        &process_name
+                                    ))
+                                    .show();
+                            }
                             _ => {}
                         }
                     }
@@ -133,6 +146,7 @@ mod tests {
         assert_eq!(status_prefix(STATUS_WORKING), "[~]");
         assert_eq!(status_prefix(STATUS_FINISHED), "[✓]");
         assert_eq!(status_prefix(STATUS_DEAD), "[X]");
+        assert_eq!(status_prefix(STATUS_GIT_CONFLICT), "[!]");
         assert_eq!(status_prefix(99), "[ ]");
     }
 

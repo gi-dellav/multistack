@@ -37,10 +37,11 @@ The path must point to an **already-existing** Unix domain socket. zerostack wil
 
 Each message is a single ASCII line terminated by `\n`:
 
-| Message   | Meaning                                   |
-|-----------|-------------------------------------------|
-| `start\n` | Agent run has begun (streaming or single) |
-| `stop\n`  | Agent run has completed or was cancelled  |
+| Message           | Meaning                                   |
+|-------------------|-------------------------------------------|
+| `start\n`         | Agent run has begun (streaming or single) |
+| `stop\n`          | Agent run has completed or was cancelled  |
+| `git-conflict\n`  | Agent is blocked — user must resolve a Git conflict |
 
 No other messages are defined. The protocol is intentionally minimal — richer state is available via the [ACP server](#advanced-acp-server) for full session introspection.
 
@@ -63,6 +64,7 @@ zerostack silently ignores all errors from the Unix socket (connection refused, 
 | Agent run begins (any mode)     | `start`             |
 | Agent run completes (any mode)  | `stop`              |
 | Agent run errors out            | `stop`              |
+| Agent hits a Git merge conflict | `git-conflict`      |
 
 ### TUI Mode (additional triggers)
 
@@ -120,6 +122,8 @@ while True:
         elif msg == "stop":
             is_running = False
             print("zerostack: stopped")
+        elif msg == "git-conflict":
+            print("zerostack: git conflict — needs user attention")
 ```
 
 ### Minimal Rust Example (tokio)
@@ -145,9 +149,10 @@ async fn main() -> std::io::Result<()> {
             let msg = String::from_utf8_lossy(&buf[..n]);
             for line in msg.lines() {
                 match line {
-                    "start" => println!("zerostack: started"),
-                    "stop"  => println!("zerostack: stopped"),
-                    _       => eprintln!("unknown: {line}"),
+                    "start"         => println!("zerostack: started"),
+                    "stop"          => println!("zerostack: stopped"),
+                    "git-conflict"  => println!("zerostack: git conflict — needs user attention"),
+                    _               => eprintln!("unknown: {line}"),
                 }
             }
         });
@@ -185,7 +190,7 @@ The ACP protocol uses the `agent-client-protocol` crate's schema. See `src/extra
 | Transport         | Unix domain socket, `SOCK_STREAM`             |
 | Direction         | zerostack connects to listener (client role)  |
 | Encoding          | ASCII lines, `\n` delimited                   |
-| Messages          | `start`, `stop`                               |
+| Messages          | `start`, `stop`, `git-conflict`               |
 | Feature flag      | `status-signals`                              |
 | CLI flag          | `--status-socket <PATH>`                      |
 | Creation          | Listener must exist before zerostack runs     |

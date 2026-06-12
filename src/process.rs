@@ -300,4 +300,13 @@ mod tests {
         sync_statuses(std::slice::from_ref(&p));
         assert_eq!(p.status.load(Ordering::SeqCst), status::STATUS_NOT_YET);
     }
+
+    #[test]
+    fn test_sync_statuses_git_conflict_preserved() {
+        let p = make_test_process(false, status::STATUS_GIT_CONFLICT, 10000, false);
+        sync_statuses(std::slice::from_ref(&p));
+        assert_eq!(p.status.load(Ordering::SeqCst), status::STATUS_GIT_CONFLICT);
+        assert_eq!(p.active_ms.load(Ordering::SeqCst), 10000);
+        assert!(p.cycle_start.lock().is_none());
+    }
 }
