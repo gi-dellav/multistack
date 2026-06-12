@@ -1,6 +1,6 @@
 [package]
 name = "multistack"
-version = "1.0.0-rc3"
+version = "1.0.0-rc4"
 edition = "2024"
 authors = ["Giuseppe Della Vedova"]
 description = "Open source lightweight TUI for parallel agent management"
