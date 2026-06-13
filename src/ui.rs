@@ -146,9 +146,9 @@ fn render_normal(
         let help = if confirm_quit {
             Line::from("Press q again to quit")
         } else if cols < 40 {
-            Line::from("n:new N:go m:bare r:ren d:kill h:lg s:sh l:rmprj p:newprj Enter:TTY q:quit")
+            Line::from("n:new N:go m:bare r:ren d:kill h:lg s:sh p/l:new/rmprj Enter:TTY q:quit")
         } else {
-            Line::from("n: new  N: spawn & enter  m: spawn bare  r: rename  d: kill  h: lazygit  s: shell  p: new project  l: rm project  Enter: TTY  q/Esc: quit")
+            Line::from("n: new  N: spawn & enter  m: spawn bare  r: rename  d: kill  h: lazygit  s: shell  p/l: new/rm project  Enter: TTY  q/Esc: quit")
         };
         frame.render_widget(help, help_area);
     })?;
