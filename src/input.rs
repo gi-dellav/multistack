@@ -65,6 +65,12 @@ fn find_project_dir(projects: &[Project], project_id: usize) -> Option<String> {
         .map(|p| p.directory.clone())
 }
 
+enum SpawnMode {
+    Worktree(String),
+    Parallel,
+    Bare,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn spawn_zerostack(
     pty_system: &NativePtySystem,
@@ -73,7 +79,7 @@ fn spawn_zerostack(
     project_id: usize,
     project_dir: &str,
     title: Option<&str>,
-    worktree: Option<&str>,
+    mode: SpawnMode,
     term_rows: u16,
     term_cols: u16,
     selected: &mut usize,
@@ -83,10 +89,10 @@ fn spawn_zerostack(
     let _ = std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut rand_bytes));
     let rand_suffix = format!("{:08x}", u32::from_le_bytes(rand_bytes));
     let socket_path = format!("/tmp/multistack-{}-{}.sock", id, rand_suffix);
-    let args: Vec<&str> = if let Some(wt) = worktree {
-        vec!["--worktree", wt, "--status-socket", &socket_path]
-    } else {
-        vec!["--parallel", "--status-socket", &socket_path]
+    let args: Vec<&str> = match &mode {
+        SpawnMode::Worktree(wt) => vec!["--worktree", wt.as_str(), "--status-socket", &socket_path],
+        SpawnMode::Parallel => vec!["--parallel", "--status-socket", &socket_path],
+        SpawnMode::Bare => vec!["--status-socket", &socket_path],
     };
     match spawn_process(
         pty_system,
@@ -166,7 +172,23 @@ fn process_key(
                     {
                         let new_selected = *selected;
                         spawn_zerostack(
-                            pty_system, next_id, processes, project_id, &dir, None, None,
+                            pty_system, next_id, processes, project_id, &dir, None, SpawnMode::Parallel,
+                            term_rows, term_cols, selected,
+                        );
+                        if let Some(proc) = processes.last() {
+                            let pid = proc.id;
+                            *selected = new_selected;
+                            *mode = Mode::Tty { process_id: pid };
+                        }
+                    }
+                }
+                KeyCode::Char('m') => {
+                    if let Some(project_id) = resolve_project(entries, projects, *selected)
+                        && let Some(dir) = find_project_dir(projects, project_id)
+                    {
+                        let new_selected = *selected;
+                        spawn_zerostack(
+                            pty_system, next_id, processes, project_id, &dir, None, SpawnMode::Bare,
                             term_rows, term_cols, selected,
                         );
                         if let Some(proc) = processes.last() {
@@ -424,7 +446,7 @@ fn process_key(
                                 pid,
                                 &dir,
                                 Some(&display),
-                                Some(wt_name.as_str()),
+                                SpawnMode::Worktree(wt_name),
                                 term_rows,
                                 term_cols,
                                 selected,
