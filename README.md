@@ -18,28 +18,73 @@ Multistack is designed to be a native, lightweight and open-soruce competitor to
 
 ## Install
 
-NOTE: Multistack is currently in beta stage, and requires *zerostack v1.5*, which is also in a beta stage.
+### Homebrew (recommended)
 
 ```bash
-cargo install zerostack --version 1.5.0-rc4   # Run if you don't have zerostack v1.5+
-cargo install multistack --version 1.0.0-rc2
+brew tap gi-dellav/tap
+brew trust gi-dellav/tap   # required for Homebrew 6.0.0+
+brew install multistack    # zerostack installed automatically
+```
+
+### Script
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/gi-dellav/multistack/main/install.sh | bash
+```
+
+### Cargo
+
+```bash
+cargo install multistack
 ```
 
 You need [zerostack](https://gi-dellav.github.io/zerostack/) on your PATH, plus a recent Rust toolchain.
 
 ## Keybindings
 
+### Agent list (normal mode)
+
 | Key | Action |
 |---|---|
-| `n` | Spawn a new agent (prompts for a name) |
-| `Enter` | Open the selected agent's TTY |
+| `n` | Spawn new agent — prompts for a name, creates a git worktree |
+| `N` | Spawn new agent in parallel mode — no prompt, jumps straight to TTY |
+| `m` | Spawn bare agent — no worktree, no `--parallel`, jumps to TTY |
+| `p` | Add project — opens directory picker |
+| `l` | Remove project and all its agents |
+| `h` | Open `lazygit` in the project (or agent worktree) directory |
+| `s` | Open `$SHELL` in the project (or agent worktree) directory |
 | `r` | Rename selected agent |
-| `k` | Kill selected agent |
+| `d` | Delete (kill) selected agent |
+| `Enter` | Drop into the selected agent's TTY |
 | `↑` / `↓` | Move selection |
-| `Esc` | Leave TTY / dismiss prompt / quit |
+| `PageUp` / `PageDown` | Jump to previous / next project header |
 | `q` | Quit |
+| `Esc` | Quit (press twice if agents have git conflicts) |
 
-Inside a TTY view, all keystrokes forward to the agent. Press `Esc` to go back to the list.
+### TTY view (agent / lazygit / shell)
+
+| Key | Action |
+|---|---|
+| `Esc` | Return to agent list |
+| *All other keys* | Forwarded to the underlying process |
+
+### Prompt (new agent / rename / new project)
+
+| Key | Action |
+|---|---|
+| `Enter` | Confirm |
+| `Esc` | Cancel |
+| `Backspace` | Delete last character |
+| *Printable chars* | Append to input |
+
+### Directory picker
+
+| Key | Action |
+|---|---|
+| `Enter` | Add selected directory as a project |
+| `Esc` | Cancel, return to agent list |
+| `/` | Start filtering directories (type to narrow, `Esc` to clear) |
+| *All other keys* | Navigate the file tree |
 
 ## Requirements
 
