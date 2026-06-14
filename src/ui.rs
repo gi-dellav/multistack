@@ -8,7 +8,7 @@ use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{FrameExt, List, ListItem, ListState};
-use ratatui_explorer::FileExplorer;
+use ratatui_explorer_multistack::FileExplorer;
 
 use crate::Mode;
 use crate::process::Process;

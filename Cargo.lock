@@ -1251,7 +1251,7 @@ dependencies = [
 
 [[package]]
 name = "multistack"
-version = "1.0.0-rc6"
+version = "1.0.0"
 dependencies = [
  "clap",
  "crossterm",
@@ -1261,7 +1261,7 @@ dependencies = [
  "parking_lot",
  "portable-pty",
  "ratatui",
- "ratatui-explorer",
+ "ratatui-explorer-multistack",
  "tokio",
  "vt100",
 ]
@@ -1762,9 +1762,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "ratatui-explorer"
+name = "ratatui-explorer-multistack"
 version = "0.3.0"
-source = "git+https://github.com/gi-dellav/ratatui-explorer.git#9355fc7abe6a5d9cfa98c23a08dc1137e8cb8f25"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e91a427f2a2a4074bafd0f90b37468b8e5ec4ddc8ec1983c3665f0b73c171dc"
 dependencies = [
  "educe",
  "ratatui",

@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use portable_pty::{NativePtySystem, PtySize};
-use ratatui_explorer::{FileExplorerBuilder, Theme};
+use ratatui_explorer_multistack::{FileExplorerBuilder, Theme};
 
 use crate::Mode;
 use crate::persistence::save_projects;
@@ -95,8 +95,19 @@ fn spawn_zerostack(
     let rand_suffix = format!("{:08x}", u32::from_le_bytes(rand_bytes));
     let socket_path = format!("/tmp/multistack-{}-{}.sock", id, rand_suffix);
     let args: Vec<&str> = match &mode {
-        SpawnMode::Worktree(wt) => vec!["--worktree", wt.as_str(), "--wt-auto-merge", "--status-socket", &socket_path],
-        SpawnMode::Parallel => vec!["--parallel", "--wt-auto-merge", "--status-socket", &socket_path],
+        SpawnMode::Worktree(wt) => vec![
+            "--worktree",
+            wt.as_str(),
+            "--wt-auto-merge",
+            "--status-socket",
+            &socket_path,
+        ],
+        SpawnMode::Parallel => vec![
+            "--parallel",
+            "--wt-auto-merge",
+            "--status-socket",
+            &socket_path,
+        ],
         SpawnMode::Bare => vec!["--status-socket", &socket_path],
     };
     match spawn_process(
@@ -179,8 +190,16 @@ fn process_key(
                     {
                         let new_selected = *selected;
                         spawn_zerostack(
-                            pty_system, next_id, processes, project_id, &dir, None, SpawnMode::Parallel,
-                            term_rows, term_cols, selected,
+                            pty_system,
+                            next_id,
+                            processes,
+                            project_id,
+                            &dir,
+                            None,
+                            SpawnMode::Parallel,
+                            term_rows,
+                            term_cols,
+                            selected,
                         );
                         if let Some(proc) = processes.last() {
                             let pid = proc.id;
@@ -195,8 +214,16 @@ fn process_key(
                     {
                         let new_selected = *selected;
                         spawn_zerostack(
-                            pty_system, next_id, processes, project_id, &dir, None, SpawnMode::Bare,
-                            term_rows, term_cols, selected,
+                            pty_system,
+                            next_id,
+                            processes,
+                            project_id,
+                            &dir,
+                            None,
+                            SpawnMode::Bare,
+                            term_rows,
+                            term_cols,
+                            selected,
                         );
                         if let Some(proc) = processes.last() {
                             let pid = proc.id;
@@ -533,15 +560,13 @@ fn process_key(
                         if chars.is_empty() {
                             let _ = explorer.set_search_query(None);
                         } else {
-                            let _ = explorer
-                                .set_search_query(Some(chars.into_iter().collect()));
+                            let _ = explorer.set_search_query(Some(chars.into_iter().collect()));
                         }
                         return Ok(false);
                     }
                     KeyCode::Char(c) if c != '/' => {
                         let current = explorer.search_query().unwrap().clone();
-                        let _ = explorer
-                            .set_search_query(Some(format!("{}{}", current, c)));
+                        let _ = explorer.set_search_query(Some(format!("{}{}", current, c)));
                         return Ok(false);
                     }
                     _ => {}

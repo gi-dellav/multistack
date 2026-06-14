@@ -20,7 +20,7 @@ use crossterm::{
 use futures::StreamExt;
 use portable_pty::NativePtySystem;
 use ratatui::{Terminal, backend::CrosstermBackend};
-use ratatui_explorer::FileExplorer;
+use ratatui_explorer_multistack::FileExplorer;
 
 use input::process_event;
 use persistence::load_project_dirs;
@@ -30,11 +30,24 @@ use status::STATUS_GIT_CONFLICT;
 use ui::render;
 
 #[derive(Parser)]
-#[command(name = "multistack", version, about = "Lightweight TUI for parallel AI agent management")]
+#[command(
+    name = "multistack",
+    version,
+    about = "Lightweight TUI for parallel AI agent management"
+)]
 struct Cli {
-    #[arg(short = 'c', long = "continue", default_value_t = false, help = "Load the saved project list from the previous session")]
+    #[arg(
+        short = 'c',
+        long = "continue",
+        default_value_t = false,
+        help = "Load the saved project list from the previous session"
+    )]
     continue_session: bool,
-    #[arg(long = "dont-save", default_value_t = false, help = "Do not load or save the project list")]
+    #[arg(
+        long = "dont-save",
+        default_value_t = false,
+        help = "Do not load or save the project list"
+    )]
     dont_save: bool,
 }
 

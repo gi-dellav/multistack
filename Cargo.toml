@@ -1,6 +1,6 @@
 [package]
 name = "multistack"
-version = "1.0.0-rc6"
+version = "1.0.0"
 edition = "2024"
 authors = ["Giuseppe Della Vedova"]
 description = "Open source lightweight TUI for parallel agent management"
@@ -19,7 +19,7 @@ notify-rust = "4.17.0"
 parking_lot = "0.12.5"
 portable-pty = "0.9.0"
 ratatui = { version = "0.30", features = ["crossterm"] }
-ratatui-explorer = { git = "https://github.com/gi-dellav/ratatui-explorer.git", version = "0.3.0" }
+ratatui-explorer-multistack = "0.3.0"
 
 tokio = { version = "1", features = ["full"] }
 vt100 = "0.16.2"
