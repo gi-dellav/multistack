@@ -24,6 +24,7 @@ pub fn process_event(
     term_cols: &mut u16,
     entries: &[ListEntry],
     dont_save: bool,
+    confirm_quit: bool,
 ) -> std::io::Result<bool> {
     match event {
         Event::Resize(w, h) => {
@@ -54,6 +55,7 @@ pub fn process_event(
                 *term_cols,
                 entries,
                 dont_save,
+                confirm_quit,
             );
         }
         _ => {}
@@ -157,6 +159,7 @@ fn process_key(
     term_cols: u16,
     entries: &[ListEntry],
     dont_save: bool,
+    confirm_quit: bool,
 ) -> std::io::Result<bool> {
     match mode {
         Mode::Normal { selected } => {
@@ -376,6 +379,7 @@ fn process_key(
                         *selected = start + idx;
                     }
                 }
+                KeyCode::Esc if confirm_quit => return Ok(false),
                 KeyCode::Esc | KeyCode::Char('q') => return Ok(true),
                 _ => {}
             }

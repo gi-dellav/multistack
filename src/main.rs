@@ -7,6 +7,7 @@ mod ui;
 
 use std::io::stdout;
 use std::path::Path;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use clap::Parser;
@@ -25,6 +26,7 @@ use input::process_event;
 use persistence::load_project_dirs;
 use process::{Process, check_tty_alive, sync_statuses};
 use project::{Project, build_entries};
+use status::STATUS_GIT_CONFLICT;
 use ui::render;
 
 #[derive(Parser)]
@@ -182,6 +184,7 @@ async fn run(cli: Cli) -> std::io::Result<()> {
                             &mut term_cols,
                             &entries,
                             cli.dont_save,
+                            confirm_quit,
                         )?;
 
                         if was_tty_before_event && matches!(mode, Mode::Normal { .. }) {
@@ -195,6 +198,13 @@ async fn run(cli: Cli) -> std::io::Result<()> {
                         } else if should_quit {
                             if suppress_quit {
                                 suppress_quit = false;
+                                confirm_quit = true;
+                                let entries = build_entries(&projects, &processes);
+                                render(&mut terminal, &mode, &entries, &projects, &processes, term_rows, term_cols, confirm_quit)?;
+                                continue;
+                            }
+                            let has_git_conflict = processes.iter().any(|p| p.status.load(Ordering::SeqCst) == STATUS_GIT_CONFLICT);
+                            if has_git_conflict && !confirm_quit {
                                 confirm_quit = true;
                                 let entries = build_entries(&projects, &processes);
                                 render(&mut terminal, &mode, &entries, &projects, &processes, term_rows, term_cols, confirm_quit)?;

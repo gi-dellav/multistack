@@ -144,7 +144,12 @@ fn render_normal(
         }
 
         let help = if confirm_quit {
-            Line::from("Press q again to quit")
+            let has_git_conflict = processes.iter().any(|p| p.status.load(Ordering::SeqCst) == status::STATUS_GIT_CONFLICT);
+            if has_git_conflict {
+                Line::from("Git conflicts! Press q to quit anyway, Esc to go back")
+            } else {
+                Line::from("Press q again to quit")
+            }
         } else if cols < 40 {
             Line::from("n:new N:go m:bare r:ren d:kill h:lg s:sh p/l:new/rmprj Enter:TTY q:quit")
         } else {
