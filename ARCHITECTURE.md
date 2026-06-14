@@ -7,12 +7,13 @@ This file documents the high-level architecture of **multistack**, an open-sourc
 ```
 multistack/
 ├── src/
-│   ├── main.rs       # Entry point, tokio runtime, event loop, Mode enum
-│   ├── input.rs      # Keyboard/event dispatch, modal keybindings, key→bytes encoding
-│   ├── process.rs    # Process struct, PTY spawn/teardown, vt100 parser lifecycle
-│   ├── project.rs    # Project struct, ListEntry enum, view-model construction
-│   ├── status.rs     # Status constants, formatting, Unix-socket status listener thread
-│   └── ui.rs         # Ratatui rendering for all modes, layout, styling
+│   ├── main.rs        # Entry point, CLI parsing (clap), tokio runtime, event loop, Mode enum
+│   ├── input.rs       # Keyboard/event dispatch, modal keybindings, key→bytes encoding, save-on-mutate hooks
+│   ├── persistence.rs # Project list save/load to ~/.local/share/zerostack/multistack_projects
+│   ├── process.rs     # Process struct, PTY spawn/teardown, vt100 parser lifecycle
+│   ├── project.rs     # Project struct, ListEntry enum, view-model construction
+│   ├── status.rs      # Status constants, formatting, Unix-socket status listener thread
+│   └── ui.rs          # Ratatui rendering for all modes, layout, styling
 ├── reference_examples/  # Standalone examples (not compiled) — PTY, crossterm, vt100, ratatui
 ├── .github/workflows/   # CI (ci.yml) and release (release.yml)
 ├── Cargo.toml           # Single binary crate, no workspace
@@ -100,7 +101,8 @@ No Rust channels are used. Inter-thread communication is exclusively through sha
 ## Design Decisions
 
 - **Single-threaded async** — Tokio `current_thread` rather than multi-threaded. All UI and state is single-owner; atomics serve background threads (PTY reader, status listener). Avoids synchronization complexity.
-- **No configuration** — Zero CLI flags, zero config files. Initial context from `std::env::current_dir()` and `$SHELL`. All state is runtime-constructed through the TUI. Persistence is explicitly out of scope.
+- **CLI flags** — Two optional booleans parsed with `clap`: `-c`/`--continue` loads the saved project list on startup; `--dont-save` disables all persistence (load and save). No config files.
+- **Project list persistence** — `persistence.rs` saves the project directory list to `$DATA_DIR/zerostack/multistack_projects` (resolved via `dirs` crate) on every project add/remove. The file is newline-separated directory paths. Loading is opt-in via `-c`.
 - **Modal UI** — Vim-inspired modes (Normal, Insert/Tty, Prompt) mapped via the `Mode` enum. Each mode has its own keybinding table in `input.rs`.
 - **Direct terminal rendering in TTY mode** — `render_tty()` writes vt100-parsed screen content directly to stdout, bypassing ratatui's framebuffer. This gives pixel-perfect terminal emulation for the active agent.
 - **Shared-memory actor pattern** — Status listener thread and PTY reader threads communicate with the main loop via `Arc<Atomic*>` rather than channels. Simple, lock-free for reads.
@@ -120,7 +122,9 @@ No Rust channels are used. Inter-thread communication is exclusively through sha
 | `notify-rust` 4.17 | Desktop notifications on agent state changes |
 | `parking_lot` 0.12 | Faster `Mutex` for `vt100::Parser` and cycle timer |
 | `futures` 0.3 | `StreamExt` trait for async event stream consumption |
+| `clap` 4 | CLI argument parsing (`-c`/`--continue`, `--dont-save`) |
+| `dirs` 6 | Cross-platform data directory for project list persistence |
 
 ## Entry Points
 
-- **`src/main.rs:fn main()`** — The sole entry point. Creates a `current_thread` tokio runtime and calls `run()`, which initializes the terminal, spawns the initial project/process, and enters the event loop. No subcommands, no arguments.
+- **`src/main.rs:fn main()`** — The sole entry point. Parses CLI flags via `clap`, creates a `current_thread` tokio runtime, and calls `run(cli)`, which initializes the terminal, optionally loads a saved project list (with `-c`), and enters the event loop.

@@ -7,6 +7,7 @@ use portable_pty::{NativePtySystem, PtySize};
 use ratatui_explorer::{FileExplorerBuilder, Theme};
 
 use crate::Mode;
+use crate::persistence::save_projects;
 use crate::process::{Process, resize_parsers, spawn_process, spawn_pty};
 use crate::project::{ListEntry, Project, is_agent, resolve_project};
 
@@ -22,6 +23,7 @@ pub fn process_event(
     term_rows: &mut u16,
     term_cols: &mut u16,
     entries: &[ListEntry],
+    dont_save: bool,
 ) -> std::io::Result<bool> {
     match event {
         Event::Resize(w, h) => {
@@ -51,6 +53,7 @@ pub fn process_event(
                 *term_rows,
                 *term_cols,
                 entries,
+                dont_save,
             );
         }
         _ => {}
@@ -153,6 +156,7 @@ fn process_key(
     term_rows: u16,
     term_cols: u16,
     entries: &[ListEntry],
+    dont_save: bool,
 ) -> std::io::Result<bool> {
     match mode {
         Mode::Normal { selected } => {
@@ -225,6 +229,9 @@ fn process_key(
                         processes.retain(|p| p.project_id != project_id);
                         projects.retain(|p| p.id != project_id);
                         *selected = header_idx.saturating_sub(1);
+                        if !dont_save {
+                            let _ = save_projects(projects);
+                        }
                     }
                 }
                 KeyCode::Char('h') => {
@@ -472,6 +479,9 @@ fn process_key(
                                     directory: dir,
                                 });
                                 *next_project_id += 1;
+                                if !dont_save {
+                                    let _ = save_projects(projects);
+                                }
                             } else {
                                 let _ = notify_rust::Notification::new()
                                     .summary("Invalid directory")
@@ -563,6 +573,9 @@ fn process_key(
                         directory: dir,
                     });
                     *next_project_id += 1;
+                    if !dont_save {
+                        let _ = save_projects(projects);
+                    }
                     *mode = Mode::Normal {
                         selected: *previous_selected,
                     };

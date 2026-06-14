@@ -1,4 +1,5 @@
 mod input;
+mod persistence;
 mod process;
 mod project;
 mod status;
@@ -8,6 +9,7 @@ use std::io::stdout;
 use std::path::Path;
 use std::time::Duration;
 
+use clap::Parser;
 use crossterm::{
     cursor,
     event::EventStream,
@@ -20,9 +22,19 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 use ratatui_explorer::FileExplorer;
 
 use input::process_event;
+use persistence::load_project_dirs;
 use process::{Process, check_tty_alive, sync_statuses};
 use project::{Project, build_entries};
 use ui::render;
+
+#[derive(Parser)]
+#[command(name = "multistack", about = "Lightweight TUI for parallel AI agent management")]
+struct Cli {
+    #[arg(short = 'c', long = "continue", default_value_t = false, help = "Load the saved project list from the previous session")]
+    continue_session: bool,
+    #[arg(long = "dont-save", default_value_t = false, help = "Do not load or save the project list")]
+    dont_save: bool,
+}
 
 pub enum PromptPurpose {
     NewProcess(usize),
@@ -53,13 +65,14 @@ enum Mode {
 }
 
 fn main() -> std::io::Result<()> {
+    let cli = Cli::parse();
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_time()
         .build()?;
-    rt.block_on(run())
+    rt.block_on(run(cli))
 }
 
-async fn run() -> std::io::Result<()> {
+async fn run(cli: Cli) -> std::io::Result<()> {
     let mut stdout = stdout();
     enable_raw_mode()?;
     execute!(stdout, terminal::EnterAlternateScreen, cursor::Hide)?;
@@ -70,18 +83,44 @@ async fn run() -> std::io::Result<()> {
     let mut processes: Vec<Process> = Vec::new();
     let mut next_id: usize = 1;
 
-    let cwd = std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf());
-    let main_name = cwd
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("main")
-        .to_string();
-    let mut projects = vec![Project {
-        id: 1,
-        name: main_name,
-        directory: cwd.to_string_lossy().to_string(),
-    }];
+    let mut projects: Vec<Project> = Vec::new();
     let mut next_project_id: usize = 2;
+
+    let load_from_file = cli.continue_session && !cli.dont_save;
+    if load_from_file {
+        let dirs = load_project_dirs().unwrap_or_default();
+        if !dirs.is_empty() {
+            for (i, dir) in dirs.into_iter().enumerate() {
+                let id = i + 1;
+                let name = Path::new(&dir)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(&dir)
+                    .to_string();
+                projects.push(Project {
+                    id,
+                    name,
+                    directory: dir,
+                });
+            }
+            next_project_id = projects.len() + 1;
+        }
+    }
+
+    if projects.is_empty() {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf());
+        let main_name = cwd
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("main")
+            .to_string();
+        projects.push(Project {
+            id: 1,
+            name: main_name,
+            directory: cwd.to_string_lossy().to_string(),
+        });
+        next_project_id = 2;
+    }
 
     let mut mode = Mode::Normal { selected: 0 };
 
@@ -142,6 +181,7 @@ async fn run() -> std::io::Result<()> {
                             &mut term_rows,
                             &mut term_cols,
                             &entries,
+                            cli.dont_save,
                         )?;
 
                         if was_tty_before_event && matches!(mode, Mode::Normal { .. }) {
