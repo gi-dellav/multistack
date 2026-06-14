@@ -30,7 +30,7 @@ use status::STATUS_GIT_CONFLICT;
 use ui::render;
 
 #[derive(Parser)]
-#[command(name = "multistack", about = "Lightweight TUI for parallel AI agent management")]
+#[command(name = "multistack", version, about = "Lightweight TUI for parallel AI agent management")]
 struct Cli {
     #[arg(short = 'c', long = "continue", default_value_t = false, help = "Load the saved project list from the previous session")]
     continue_session: bool,
