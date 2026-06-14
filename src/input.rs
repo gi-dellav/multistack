@@ -90,8 +90,8 @@ fn spawn_zerostack(
     let rand_suffix = format!("{:08x}", u32::from_le_bytes(rand_bytes));
     let socket_path = format!("/tmp/multistack-{}-{}.sock", id, rand_suffix);
     let args: Vec<&str> = match &mode {
-        SpawnMode::Worktree(wt) => vec!["--worktree", wt.as_str(), "--status-socket", &socket_path],
-        SpawnMode::Parallel => vec!["--parallel", "--status-socket", &socket_path],
+        SpawnMode::Worktree(wt) => vec!["--worktree", wt.as_str(), "--wt-auto-merge", "--status-socket", &socket_path],
+        SpawnMode::Parallel => vec!["--parallel", "--wt-auto-merge", "--status-socket", &socket_path],
         SpawnMode::Bare => vec!["--status-socket", &socket_path],
     };
     match spawn_process(
