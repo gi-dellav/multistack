@@ -72,3 +72,4 @@ post-release: homebrew-checksums
     @echo "=== post-release done: all checksums updated ==="
     @echo "Ready for:"
     @echo "  homebrew: push packaging/homebrew/multistack.rb to homebrew-tap repo"
+    @echo "  cargo: cargo publish"

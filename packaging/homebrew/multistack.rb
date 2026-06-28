@@ -1,28 +1,28 @@
 class Multistack < Formula
   desc "Open source lightweight TUI for parallel agent management"
   homepage "https://github.com/gi-dellav/multistack"
-  version "1.0.0"
+  version "1.0.1-rc1"
   license "GPL-3.0-only"
 
   depends_on "zerostack"
 
   on_macos do
     if Hardware::CPU.intel?
-      url "https://github.com/gi-dellav/multistack/releases/download/v1.0.0/multistack-x86_64-apple-darwin.tar.gz"
-      sha256 "35b66a71bd22b79622d77ce3d60e3b49e31662d10e3d3f0d8b320017a5025b58"
+      url "https://github.com/gi-dellav/multistack/releases/download/v1.0.1-rc1/multistack-x86_64-apple-darwin.tar.gz"
+      sha256 "066f92615560c57b07a41d199ef72d5d0a1ecf9b94df8ed44b836cec109a2133"
     else
-      url "https://github.com/gi-dellav/multistack/releases/download/v1.0.0/multistack-aarch64-apple-darwin.tar.gz"
-      sha256 "04ed7521de1b33c4a548c5e2f1da98196746b265a88b4235700ffd47648ab77c"
+      url "https://github.com/gi-dellav/multistack/releases/download/v1.0.1-rc1/multistack-aarch64-apple-darwin.tar.gz"
+      sha256 "0019dfc4b32d63c1392aa264aed2253c1e0c2fb09216f8e2cc269bbfb8bb49b5"
     end
   end
 
   on_linux do
     if Hardware::CPU.intel?
-      url "https://github.com/gi-dellav/multistack/releases/download/v1.0.0/multistack-x86_64-unknown-linux-musl.tar.gz"
-      sha256 "7719594297026a725bd57db7a640e2b2b84d51b4980225b6992a2d4d44fa3092"
+      url "https://github.com/gi-dellav/multistack/releases/download/v1.0.1-rc1/multistack-x86_64-unknown-linux-musl.tar.gz"
+      sha256 "0019dfc4b32d63c1392aa264aed2253c1e0c2fb09216f8e2cc269bbfb8bb49b5"
     else
-      url "https://github.com/gi-dellav/multistack/releases/download/v1.0.0/multistack-aarch64-unknown-linux-musl.tar.gz"
-      sha256 "fa4a346450d57463d01e474e63cd862cf7834cb475722692a09f5a88b2ba1b5c"
+      url "https://github.com/gi-dellav/multistack/releases/download/v1.0.1-rc1/multistack-aarch64-unknown-linux-musl.tar.gz"
+      sha256 "0019dfc4b32d63c1392aa264aed2253c1e0c2fb09216f8e2cc269bbfb8bb49b5"
     end
   end
 
