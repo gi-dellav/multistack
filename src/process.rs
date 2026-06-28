@@ -14,6 +14,7 @@ use crate::status;
 pub struct Process {
     pub id: usize,
     pub project_id: usize,
+    pub project_dir: String,
     pub name: String,
     pub child: Option<Box<dyn portable_pty::Child + Send>>,
     pub master: Option<Box<dyn portable_pty::MasterPty + Send>>,
@@ -57,6 +58,13 @@ pub fn check_tty_alive(mode: &Mode, processes: &mut Vec<Process>) -> Option<usiz
                 .map(|p| p.alive.load(Ordering::SeqCst));
             match alive {
                 Some(false) | None => {
+                    if let Some(dir) = processes
+                        .iter()
+                        .find(|p| p.id == pid)
+                        .map(|p| p.project_dir.clone())
+                    {
+                        run_speck_apply_if_present(&dir);
+                    }
                     processes.retain(|p| p.id != pid);
                     Some(0)
                 }
@@ -68,6 +76,7 @@ pub fn check_tty_alive(mode: &Mode, processes: &mut Vec<Process>) -> Option<usiz
             previous_selected,
         } => {
             if !process.alive.load(Ordering::SeqCst) {
+                run_speck_apply_if_present(&process.project_dir);
                 Some(*previous_selected)
             } else {
                 None
@@ -144,6 +153,7 @@ pub fn spawn_pty(
     Ok(Process {
         id: 0,
         project_id: 0,
+        project_dir: String::new(),
         name,
         child: Some(child),
         master: Some(pair.master),
@@ -178,6 +188,7 @@ pub fn spawn_process(
     let mut proc = spawn_pty(pty_system, cmd, args, title, rows, cols, cwd)?;
     proc.id = id;
     proc.project_id = project_id;
+    proc.project_dir = cwd.to_string();
 
     let (status_socket_path, shutdown_flag, listener_thread) = if let Some(path) = status_socket {
         let (flag, handle) = status::spawn_status_listener(
@@ -186,6 +197,7 @@ pub fn spawn_process(
             proc.cycle_start.clone(),
             path.to_string(),
             proc.name.clone(),
+            proc.project_dir.clone(),
         );
         (Some(path.to_string()), Some(flag), Some(handle))
     } else {
@@ -211,6 +223,16 @@ pub fn resize_parsers(processes: &mut [Process], rows: u16, cols: u16) {
     }
 }
 
+pub fn run_speck_apply_if_present(dir: &str) {
+    let speck_toml = std::path::Path::new(dir).join("Speck.toml");
+    if speck_toml.exists() {
+        let _ = std::process::Command::new("speck")
+            .arg("apply")
+            .current_dir(dir)
+            .status();
+    }
+}
+
 pub fn sync_statuses(processes: &[Process]) {
     for p in processes {
         if !p.alive.load(Ordering::SeqCst)
@@ -222,6 +244,7 @@ pub fn sync_statuses(processes: &[Process]) {
                     .fetch_add(elapsed.as_millis() as u64, Ordering::SeqCst);
             }
             p.status.store(status::STATUS_DEAD, Ordering::SeqCst);
+            run_speck_apply_if_present(&p.project_dir);
             let _ = Notification::new()
                 .summary("Agent died")
                 .body(&format!("{} has terminated unexpectedly", &p.name))
@@ -248,6 +271,7 @@ mod tests {
         Process {
             id: 1,
             project_id: 1,
+            project_dir: String::new(),
             name: "test [1]".into(),
             child: None,
             master: None,

@@ -8,7 +8,9 @@ use ratatui_explorer_multistack::{FileExplorerBuilder, Theme};
 
 use crate::Mode;
 use crate::persistence::save_projects;
-use crate::process::{Process, resize_parsers, spawn_process, spawn_pty};
+use crate::process::{
+    Process, resize_parsers, run_speck_apply_if_present, spawn_process, spawn_pty,
+};
 use crate::project::{ListEntry, Project, is_agent, resolve_project};
 
 #[allow(clippy::too_many_arguments)]
@@ -256,6 +258,9 @@ fn process_key(
                         .iter()
                         .rposition(|e| matches!(e, ListEntry::ProjectHeader(pid) if *pid == project_id))
                         .unwrap_or(0);
+                        if let Some(dir) = find_project_dir(projects, project_id) {
+                            run_speck_apply_if_present(&dir);
+                        }
                         processes.retain(|p| p.project_id != project_id);
                         projects.retain(|p| p.id != project_id);
                         *selected = header_idx.saturating_sub(1);
@@ -364,6 +369,13 @@ fn process_key(
                     if is_agent(entries, *selected)
                         && let ListEntry::Agent(proc_id) = entries[*selected]
                     {
+                        if let Some(dir) = processes
+                            .iter()
+                            .find(|p| p.id == proc_id)
+                            .map(|p| p.project_dir.clone())
+                        {
+                            run_speck_apply_if_present(&dir);
+                        }
                         processes.retain(|p| p.id != proc_id);
                         if *selected > 0 {
                             *selected -= 1;

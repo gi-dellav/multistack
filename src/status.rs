@@ -59,6 +59,7 @@ pub fn spawn_status_listener(
     cycle_start: Arc<Mutex<Option<Instant>>>,
     socket_path: String,
     process_name: String,
+    project_dir: String,
 ) -> (Arc<AtomicBool>, JoinHandle<()>) {
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_clone = shutdown.clone();
@@ -96,6 +97,7 @@ pub fn spawn_status_listener(
                                 }
                                 if status.load(Ordering::SeqCst) == STATUS_WORKING {
                                     status.store(STATUS_FINISHED, Ordering::SeqCst);
+                                    crate::process::run_speck_apply_if_present(&project_dir);
                                     let _ = Notification::new()
                                         .summary("Agent finished")
                                         .body(&format!("{} has completed", &process_name))
