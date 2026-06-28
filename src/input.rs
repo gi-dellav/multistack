@@ -295,7 +295,8 @@ fn process_key(
                             term_cols,
                             &target_dir,
                         ) {
-                            Ok(process) => {
+                            Ok(mut process) => {
+                                process.kill_on_drop = true;
                                 *mode = Mode::TempTty {
                                     process,
                                     previous_selected: *selected,
@@ -337,7 +338,8 @@ fn process_key(
                             term_cols,
                             &target_dir,
                         ) {
-                            Ok(process) => {
+                            Ok(mut process) => {
+                                process.kill_on_drop = true;
                                 *mode = Mode::TempTty {
                                     process,
                                     previous_selected: *selected,
