@@ -160,8 +160,7 @@ async fn run(cli: Cli) -> std::io::Result<()> {
             if was_tty {
                 suppress_quit = true;
             }
-            let size = terminal.size()?;
-            terminal.resize(size.into())?;
+            terminal.clear()?;
         }
 
         let entries = build_entries(&projects, &processes);
@@ -203,8 +202,7 @@ async fn run(cli: Cli) -> std::io::Result<()> {
                         if was_tty_before_event && matches!(mode, Mode::Normal { .. }) {
                             suppress_quit = true;
                             confirm_quit = false;
-                            let size = terminal.size()?;
-                            terminal.resize(size.into())?;
+                            terminal.clear()?;
                             let entries = build_entries(&projects, &processes);
                             sync_statuses(&processes);
                             render(&mut terminal, &mode, &entries, &projects, &processes, term_rows, term_cols, confirm_quit)?;
