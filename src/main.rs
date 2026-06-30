@@ -54,6 +54,7 @@ struct Cli {
 
 pub enum PromptPurpose {
     NewProcess(usize),
+    NewBareProcess(usize),
     NewProject,
     Rename(usize),
 }

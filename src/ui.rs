@@ -232,7 +232,7 @@ fn render_prompt(
         }
 
         let label = match purpose {
-            crate::PromptPurpose::NewProcess(_) => "new name: ",
+            crate::PromptPurpose::NewProcess(_) | crate::PromptPurpose::NewBareProcess(_) => "new name: ",
             crate::PromptPurpose::NewProject => "project dir: ",
             crate::PromptPurpose::Rename(_) => "rename: ",
         };

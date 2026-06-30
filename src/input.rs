@@ -211,27 +211,12 @@ fn process_key(
                     }
                 }
                 KeyCode::Char('m') => {
-                    if let Some(project_id) = resolve_project(entries, projects, *selected)
-                        && let Some(dir) = find_project_dir(projects, project_id)
-                    {
-                        let new_selected = *selected;
-                        spawn_zerostack(
-                            pty_system,
-                            next_id,
-                            processes,
-                            project_id,
-                            &dir,
-                            None,
-                            SpawnMode::Bare,
-                            term_rows,
-                            term_cols,
-                            selected,
-                        );
-                        if let Some(proc) = processes.last() {
-                            let pid = proc.id;
-                            *selected = new_selected;
-                            *mode = Mode::Tty { process_id: pid };
-                        }
+                    if let Some(project_id) = resolve_project(entries, projects, *selected) {
+                        *mode = Mode::Prompt {
+                            purpose: crate::PromptPurpose::NewBareProcess(project_id),
+                            selected: *selected,
+                            input: String::new(),
+                        };
                     }
                 }
                 KeyCode::Char('p') => {
@@ -505,6 +490,28 @@ fn process_key(
                             );
                         }
                     }
+                    crate::PromptPurpose::NewBareProcess(project_id) => {
+                        let pid = *project_id;
+                        if let Some(dir) = find_project_dir(projects, pid) {
+                            let display = if title.is_empty() {
+                                "agent".to_string()
+                            } else {
+                                title.clone()
+                            };
+                            spawn_zerostack(
+                                pty_system,
+                                next_id,
+                                processes,
+                                pid,
+                                &dir,
+                                Some(&display),
+                                SpawnMode::Bare,
+                                term_rows,
+                                term_cols,
+                                selected,
+                            );
+                        }
+                    }
                     crate::PromptPurpose::NewProject => {
                         if !title.is_empty() {
                             let path = Path::new(&title);
@@ -546,10 +553,21 @@ fn process_key(
                         }
                     }
                 }
-                let new_selected = if processes.is_empty() { 0 } else { *selected };
-                *mode = Mode::Normal {
-                    selected: new_selected,
-                };
+                match purpose {
+                    crate::PromptPurpose::NewBareProcess(_) => {
+                        if let Some(proc) = processes.last() {
+                            let pid = proc.id;
+                            *mode = Mode::Tty { process_id: pid };
+                        }
+                    }
+                    _ => {
+                        let new_selected =
+                            if processes.is_empty() { 0 } else { *selected };
+                        *mode = Mode::Normal {
+                            selected: new_selected,
+                        };
+                    }
+                }
             }
             KeyCode::Backspace => {
                 input.pop();
