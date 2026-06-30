@@ -666,7 +666,15 @@ fn key_to_bytes(key: &crossterm::event::KeyEvent) -> Vec<u8> {
                 encoded.as_bytes().to_vec()
             }
         }
-        KeyCode::Enter => vec![b'\r'],
+        KeyCode::Enter => {
+            if key.modifiers.contains(KeyModifiers::SHIFT) {
+                vec![b'\n']
+            } else if key.modifiers.contains(KeyModifiers::ALT) {
+                vec![0x1b, b'\r']
+            } else {
+                vec![b'\r']
+            }
+        }
         KeyCode::Backspace => vec![0x7f],
         KeyCode::Tab => vec![b'\t'],
         KeyCode::BackTab => vec![0x1b, b'[', b'Z'],
@@ -725,6 +733,10 @@ mod tests {
         KeyEvent::new(code, KeyModifiers::ALT)
     }
 
+    fn shift(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::SHIFT)
+    }
+
     #[test]
     fn test_plain_chars() {
         assert_eq!(key_to_bytes(&kc(KeyCode::Char('a'))), b"a");
@@ -764,6 +776,13 @@ mod tests {
             key_to_bytes(&kc(KeyCode::F(12))),
             vec![0x1b, b'[', b'2', b'4', b'~']
         );
+    }
+
+    #[test]
+    fn test_enter_modifiers() {
+        assert_eq!(key_to_bytes(&kc(KeyCode::Enter)), b"\r");
+        assert_eq!(key_to_bytes(&shift(KeyCode::Enter)), b"\n");
+        assert_eq!(key_to_bytes(&alt(KeyCode::Enter)), vec![0x1b, b'\r']);
     }
 
     #[test]

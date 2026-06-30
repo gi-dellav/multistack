@@ -41,10 +41,10 @@ impl Drop for Process {
         if let Some(ref path) = self.status_socket_path {
             let _ = std::fs::remove_file(path);
         }
-        if self.kill_on_drop {
-            if let Some(ref mut child) = self.child {
-                let _ = child.kill();
-            }
+        if self.kill_on_drop
+            && let Some(ref mut child) = self.child
+        {
+            let _ = child.kill();
         }
         drop(self.master_writer.take());
         drop(self.master.take());
