@@ -1,6 +1,7 @@
 use std::io::Write;
 use std::sync::atomic::Ordering;
 
+use crossterm::style::{Attribute, Color, SetAttribute, SetBackgroundColor, SetForegroundColor};
 use crossterm::{cursor, execute};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -258,6 +259,12 @@ fn render_tty(
     let stdout = terminal.backend_mut();
     execute!(stdout, cursor::MoveTo(0, 0))?;
     stdout.write_all(&contents)?;
+    execute!(
+        stdout,
+        SetAttribute(Attribute::Reset),
+        SetForegroundColor(Color::Reset),
+        SetBackgroundColor(Color::Reset)
+    )?;
     execute!(stdout, cursor::MoveTo(cursor_col, cursor_row))?;
     stdout.flush()?;
     Ok(())

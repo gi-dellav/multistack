@@ -15,6 +15,7 @@ use crossterm::{
     cursor,
     event::EventStream,
     execute,
+    style::{Attribute, Color, SetAttribute, SetBackgroundColor, SetForegroundColor},
     terminal::{self, disable_raw_mode, enable_raw_mode},
 };
 use futures::StreamExt;
@@ -160,6 +161,12 @@ async fn run(cli: Cli) -> std::io::Result<()> {
             if was_tty {
                 suppress_quit = true;
             }
+            execute!(
+                terminal.backend_mut(),
+                SetAttribute(Attribute::Reset),
+                SetForegroundColor(Color::Reset),
+                SetBackgroundColor(Color::Reset)
+            )?;
             terminal.clear()?;
         }
 
@@ -202,6 +209,12 @@ async fn run(cli: Cli) -> std::io::Result<()> {
                         if was_tty_before_event && matches!(mode, Mode::Normal { .. }) {
                             suppress_quit = true;
                             confirm_quit = false;
+                            execute!(
+                                terminal.backend_mut(),
+                                SetAttribute(Attribute::Reset),
+                                SetForegroundColor(Color::Reset),
+                                SetBackgroundColor(Color::Reset)
+                            )?;
                             terminal.clear()?;
                             let entries = build_entries(&projects, &processes);
                             sync_statuses(&processes);
