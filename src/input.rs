@@ -539,7 +539,10 @@ fn process_key(
                         if !title.is_empty()
                             && let Some(proc) = processes.iter_mut().find(|p| p.id == *pid)
                         {
-                            proc.name = title;
+                            proc.name = title.clone();
+                            if let Some(ref name_shared) = proc.name_shared {
+                                *name_shared.lock() = title;
+                            }
                         }
                     }
                 }

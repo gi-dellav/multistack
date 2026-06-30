@@ -58,7 +58,7 @@ pub fn spawn_status_listener(
     active_ms: Arc<AtomicU64>,
     cycle_start: Arc<Mutex<Option<Instant>>>,
     socket_path: String,
-    process_name: String,
+    process_name: Arc<Mutex<String>>,
     project_dir: String,
 ) -> (Arc<AtomicBool>, JoinHandle<()>) {
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -98,19 +98,21 @@ pub fn spawn_status_listener(
                                 if status.load(Ordering::SeqCst) == STATUS_WORKING {
                                     status.store(STATUS_FINISHED, Ordering::SeqCst);
                                     crate::process::run_speck_apply_if_present(&project_dir);
+                                    let name = process_name.lock().clone();
                                     let _ = Notification::new()
                                         .summary("Agent finished")
-                                        .body(&format!("{} has completed", &process_name))
+                                        .body(&format!("{} has completed", name))
                                         .show();
                                 }
                             }
                             "git-conflict" => {
                                 status.store(STATUS_GIT_CONFLICT, Ordering::SeqCst);
+                                let name = process_name.lock().clone();
                                 let _ = Notification::new()
                                     .summary("Git conflict")
                                     .body(&format!(
                                         "{} needs your attention — resolve the Git conflict",
-                                        &process_name
+                                        name
                                     ))
                                     .show();
                             }

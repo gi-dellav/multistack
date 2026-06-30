@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::thread::JoinHandle;
 use std::time::Instant;
 
+#[cfg(not(test))]
 use notify_rust::Notification;
 use parking_lot::Mutex;
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
@@ -28,6 +29,7 @@ pub struct Process {
     shutdown_flag: Option<Arc<AtomicBool>>,
     listener_thread: Option<JoinHandle<()>>,
     pub kill_on_drop: bool,
+    pub name_shared: Option<Arc<Mutex<String>>>,
 }
 
 impl Drop for Process {
@@ -173,6 +175,7 @@ pub fn spawn_pty(
         shutdown_flag: None,
         listener_thread: None,
         kill_on_drop: false,
+        name_shared: None,
     })
 }
 
@@ -198,14 +201,16 @@ pub fn spawn_process(
     proc.project_dir = cwd.to_string();
 
     let (status_socket_path, shutdown_flag, listener_thread) = if let Some(path) = status_socket {
+        let name_shared = Arc::new(Mutex::new(proc.name.clone()));
         let (flag, handle) = status::spawn_status_listener(
             proc.status.clone(),
             proc.active_ms.clone(),
             proc.cycle_start.clone(),
             path.to_string(),
-            proc.name.clone(),
+            name_shared.clone(),
             proc.project_dir.clone(),
         );
+        proc.name_shared = Some(name_shared);
         (Some(path.to_string()), Some(flag), Some(handle))
     } else {
         (None, None, None)
@@ -252,10 +257,13 @@ pub fn sync_statuses(processes: &[Process]) {
             }
             p.status.store(status::STATUS_DEAD, Ordering::SeqCst);
             run_speck_apply_if_present(&p.project_dir);
-            let _ = Notification::new()
-                .summary("Agent died")
-                .body(&format!("{} has terminated unexpectedly", &p.name))
-                .show();
+            #[cfg(not(test))]
+            {
+                let _ = Notification::new()
+                    .summary("Agent died")
+                    .body(&format!("{} has terminated unexpectedly", &p.name))
+                    .show();
+            }
         }
     }
 }
@@ -292,6 +300,7 @@ mod tests {
             shutdown_flag: None,
             listener_thread: None,
             kill_on_drop: false,
+            name_shared: None,
         }
     }
 
