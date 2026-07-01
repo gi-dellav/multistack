@@ -60,6 +60,26 @@ pub fn process_event(
                 confirm_quit,
             );
         }
+        Event::Paste(text) => {
+            match mode {
+                Mode::Tty { process_id } => {
+                    let pid = *process_id;
+                    if let Some(proc) = processes.iter_mut().find(|p| p.id == pid)
+                        && let Some(ref mut writer) = proc.master_writer
+                    {
+                        let _ = writer.write_all(text.as_bytes());
+                        let _ = writer.flush();
+                    }
+                }
+                Mode::TempTty { process, .. } => {
+                    if let Some(ref mut writer) = process.master_writer {
+                        let _ = writer.write_all(text.as_bytes());
+                        let _ = writer.flush();
+                    }
+                }
+                _ => {}
+            }
+        }
         _ => {}
     }
     Ok(false)
@@ -689,9 +709,11 @@ fn key_to_bytes(key: &crossterm::event::KeyEvent) -> Vec<u8> {
         }
         KeyCode::Enter => {
             if key.modifiers.contains(KeyModifiers::SHIFT) {
-                vec![b'\n']
+                vec![0x1b, b'[', b'1', b'3', b';', b'2', b'u']
             } else if key.modifiers.contains(KeyModifiers::ALT) {
                 vec![0x1b, b'\r']
+            } else if key.modifiers.contains(KeyModifiers::CONTROL) {
+                vec![0x1b, b'[', b'1', b'3', b';', b'5', b'u']
             } else {
                 vec![b'\r']
             }
@@ -802,8 +824,9 @@ mod tests {
     #[test]
     fn test_enter_modifiers() {
         assert_eq!(key_to_bytes(&kc(KeyCode::Enter)), b"\r");
-        assert_eq!(key_to_bytes(&shift(KeyCode::Enter)), b"\n");
+        assert_eq!(key_to_bytes(&shift(KeyCode::Enter)), vec![0x1b, b'[', b'1', b'3', b';', b'2', b'u']);
         assert_eq!(key_to_bytes(&alt(KeyCode::Enter)), vec![0x1b, b'\r']);
+        assert_eq!(key_to_bytes(&ctrl(KeyCode::Enter)), vec![0x1b, b'[', b'1', b'3', b';', b'5', b'u']);
     }
 
     #[test]
