@@ -168,7 +168,8 @@ async fn run(cli: Cli) -> std::io::Result<()> {
                 SetForegroundColor(Color::Reset),
                 SetBackgroundColor(Color::Reset)
             )?;
-            terminal.clear()?;
+            let area = terminal.get_frame().area();
+            terminal.resize(area)?;
         }
 
         let entries = build_entries(&projects, &processes);
@@ -216,7 +217,8 @@ async fn run(cli: Cli) -> std::io::Result<()> {
                                 SetForegroundColor(Color::Reset),
                                 SetBackgroundColor(Color::Reset)
                             )?;
-                            terminal.clear()?;
+                            let area = terminal.get_frame().area();
+                            terminal.resize(area)?;
                             let entries = build_entries(&projects, &processes);
                             sync_statuses(&processes);
                             render(&mut terminal, &mode, &entries, &projects, &processes, term_rows, term_cols, confirm_quit)?;
