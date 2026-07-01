@@ -26,6 +26,7 @@ pub fn process_event(
     term_cols: &mut u16,
     entries: &[ListEntry],
     dont_save: bool,
+    no_worktree: bool,
     confirm_quit: bool,
 ) -> std::io::Result<bool> {
     match event {
@@ -57,6 +58,7 @@ pub fn process_event(
                 *term_cols,
                 entries,
                 dont_save,
+                no_worktree,
                 confirm_quit,
             );
         }
@@ -192,13 +194,22 @@ fn process_key(
     term_cols: u16,
     entries: &[ListEntry],
     dont_save: bool,
+    no_worktree: bool,
     confirm_quit: bool,
 ) -> std::io::Result<bool> {
     match mode {
         Mode::Normal { selected } => {
             match key.code {
                 KeyCode::Char('n') => {
-                    if let Some(project_id) = resolve_project(entries, projects, *selected) {
+                    if no_worktree {
+                        if let Some(project_id) = resolve_project(entries, projects, *selected) {
+                            *mode = Mode::Prompt {
+                                purpose: crate::PromptPurpose::NewBareProcess(project_id),
+                                selected: *selected,
+                                input: String::new(),
+                            };
+                        }
+                    } else if let Some(project_id) = resolve_project(entries, projects, *selected) {
                         *mode = Mode::Prompt {
                             purpose: crate::PromptPurpose::NewProcess(project_id),
                             selected: *selected,
@@ -207,26 +218,28 @@ fn process_key(
                     }
                 }
                 KeyCode::Char('N') => {
-                    if let Some(project_id) = resolve_project(entries, projects, *selected)
-                        && let Some(dir) = find_project_dir(projects, project_id)
-                    {
-                        let new_selected = *selected;
-                        spawn_zerostack(
-                            pty_system,
-                            next_id,
-                            processes,
-                            project_id,
-                            &dir,
-                            None,
-                            SpawnMode::Parallel,
-                            term_rows,
-                            term_cols,
-                            selected,
-                        );
-                        if let Some(proc) = processes.last() {
-                            let pid = proc.id;
-                            *selected = new_selected;
-                            *mode = Mode::Tty { process_id: pid };
+                    if !no_worktree {
+                        if let Some(project_id) = resolve_project(entries, projects, *selected)
+                            && let Some(dir) = find_project_dir(projects, project_id)
+                        {
+                            let new_selected = *selected;
+                            spawn_zerostack(
+                                pty_system,
+                                next_id,
+                                processes,
+                                project_id,
+                                &dir,
+                                None,
+                                SpawnMode::Parallel,
+                                term_rows,
+                                term_cols,
+                                selected,
+                            );
+                            if let Some(proc) = processes.last() {
+                                let pid = proc.id;
+                                *selected = new_selected;
+                                *mode = Mode::Tty { process_id: pid };
+                            }
                         }
                     }
                 }

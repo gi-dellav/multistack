@@ -26,6 +26,7 @@ pub fn render(
     rows: u16,
     cols: u16,
     confirm_quit: bool,
+    no_worktree: bool,
 ) -> std::io::Result<()> {
     match mode {
         Mode::Normal { selected } => render_normal(
@@ -37,6 +38,7 @@ pub fn render(
             rows,
             cols,
             confirm_quit,
+            no_worktree,
         ),
         Mode::Prompt {
             purpose,
@@ -88,6 +90,7 @@ fn render_normal(
     _rows: u16,
     cols: u16,
     confirm_quit: bool,
+    no_worktree: bool,
 ) -> std::io::Result<()> {
     terminal.draw(|frame| {
         let layout = Layout::vertical([
@@ -150,6 +153,12 @@ fn render_normal(
                 Line::from("Git conflicts! Press q to quit anyway, Esc to go back")
             } else {
                 Line::from("Press q again to quit")
+            }
+        } else if no_worktree {
+            if cols < 40 {
+                Line::from("m:bare r:ren d:kill h:lg s:sh p/l:new/rmprj Enter:TTY q:quit")
+            } else {
+                Line::from("m: spawn bare  r: rename  d: kill  h: lazygit  s: shell  p/l: new/rm project  Enter: TTY  q/Esc: quit")
             }
         } else if cols < 40 {
             Line::from("n:new N:go m:bare r:ren d:kill h:lg s:sh p/l:new/rmprj Enter:TTY q:quit")

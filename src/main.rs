@@ -50,6 +50,13 @@ struct Cli {
         help = "Do not load or save the project list"
     )]
     dont_save: bool,
+    #[arg(
+        short = 'w',
+        long = "no-worktree",
+        default_value_t = false,
+        help = "Disable worktree integration (n spawns bare agent, N disabled)"
+    )]
+    no_worktree: bool,
 }
 
 pub enum PromptPurpose {
@@ -186,7 +193,7 @@ async fn run(cli: Cli) -> std::io::Result<()> {
 
         tokio::select! {
                 _ = render_interval.tick() => {
-                render(&mut terminal, &mode, &entries, &projects, &processes, term_rows, term_cols, confirm_quit)?;
+                render(&mut terminal, &mode, &entries, &projects, &processes, term_rows, term_cols, confirm_quit, cli.no_worktree)?;
             }
             maybe_event = reader.next() => {
                 match maybe_event {
@@ -205,6 +212,7 @@ async fn run(cli: Cli) -> std::io::Result<()> {
                             &mut term_cols,
                             &entries,
                             cli.dont_save,
+                            cli.no_worktree,
                             confirm_quit,
                         )?;
 
@@ -221,20 +229,20 @@ async fn run(cli: Cli) -> std::io::Result<()> {
                             terminal.resize(area)?;
                             let entries = build_entries(&projects, &processes);
                             sync_statuses(&processes);
-                            render(&mut terminal, &mode, &entries, &projects, &processes, term_rows, term_cols, confirm_quit)?;
+                            render(&mut terminal, &mode, &entries, &projects, &processes, term_rows, term_cols, confirm_quit, cli.no_worktree)?;
                         } else if should_quit {
                             if suppress_quit {
                                 suppress_quit = false;
                                 confirm_quit = true;
                                 let entries = build_entries(&projects, &processes);
-                                render(&mut terminal, &mode, &entries, &projects, &processes, term_rows, term_cols, confirm_quit)?;
+                                render(&mut terminal, &mode, &entries, &projects, &processes, term_rows, term_cols, confirm_quit, cli.no_worktree)?;
                                 continue;
                             }
                             let has_git_conflict = processes.iter().any(|p| p.status.load(Ordering::SeqCst) == STATUS_GIT_CONFLICT);
                             if has_git_conflict && !confirm_quit {
                                 confirm_quit = true;
                                 let entries = build_entries(&projects, &processes);
-                                render(&mut terminal, &mode, &entries, &projects, &processes, term_rows, term_cols, confirm_quit)?;
+                                render(&mut terminal, &mode, &entries, &projects, &processes, term_rows, term_cols, confirm_quit, cli.no_worktree)?;
                                 continue;
                             }
                             execute!(terminal.backend_mut(), cursor::Show, terminal::LeaveAlternateScreen)?;
@@ -253,7 +261,7 @@ async fn run(cli: Cli) -> std::io::Result<()> {
                                     *selected = entries.len() - 1;
                                 }
                             }
-                            render(&mut terminal, &mode, &entries, &projects, &processes, term_rows, term_cols, confirm_quit)?;
+                            render(&mut terminal, &mode, &entries, &projects, &processes, term_rows, term_cols, confirm_quit, cli.no_worktree)?;
                         }
                     }
                     Some(Err(e)) => {
