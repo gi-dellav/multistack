@@ -30,6 +30,7 @@ pub struct Process {
     listener_thread: Option<JoinHandle<()>>,
     pub kill_on_drop: bool,
     pub name_shared: Option<Arc<Mutex<String>>>,
+    pub prev_screen: Arc<Mutex<Option<vt100::Screen>>>,
 }
 
 impl Drop for Process {
@@ -176,6 +177,7 @@ pub fn spawn_pty(
         listener_thread: None,
         kill_on_drop: false,
         name_shared: None,
+        prev_screen: Arc::new(Mutex::new(None)),
     })
 }
 
@@ -232,6 +234,8 @@ pub fn resize_parsers(processes: &mut [Process], rows: u16, cols: u16) {
         let mut new_parser = vt100::Parser::new(rows, cols, old_screen.scrollback());
         new_parser.process(&old_screen.contents_formatted());
         *parser = new_parser;
+        // Invalidate cached previous screen after resize to force full redraw
+        *proc.prev_screen.lock() = None;
     }
 }
 
@@ -301,6 +305,7 @@ mod tests {
             listener_thread: None,
             kill_on_drop: false,
             name_shared: None,
+            prev_screen: Arc::new(parking_lot::Mutex::new(None)),
         }
     }
 

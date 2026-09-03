@@ -44,6 +44,28 @@ pub fn process_event(
                 }
             }
             resize_parsers(processes, h, w);
+            // Also resize TempTty if active (its process is stored inside Mode)
+            if let Mode::TempTty { process, .. } = mode {
+                if let Some(ref master) = process.master {
+                    let _ = master.resize(PtySize {
+                        rows: h,
+                        cols: w,
+                        pixel_width: 0,
+                        pixel_height: 0,
+                    });
+                }
+                // Resize its parser and invalidate cache
+                {
+                    let mut parser = process.parser.lock();
+                    let old_screen = parser.screen().clone();
+                    let rows = if h == 0 { 24 } else { h };
+                    let cols = if w == 0 { 80 } else { w };
+                    let mut new_parser = vt100::Parser::new(rows, cols, old_screen.scrollback());
+                    new_parser.process(&old_screen.contents_formatted());
+                    *parser = new_parser;
+                }
+                *process.prev_screen.lock() = None;
+            }
         }
         Event::Key(key) if key.kind != KeyEventKind::Release => {
             return process_key(
@@ -77,6 +99,19 @@ pub fn process_event(
                     if let Some(ref mut writer) = process.master_writer {
                         let _ = writer.write_all(text.as_bytes());
                         let _ = writer.flush();
+                    }
+                }
+                Mode::Prompt { input, .. } => {
+                    // Filter out control characters that could trigger unintended actions;
+                    // keep printable pasted text for prompt input.
+                    let filtered: String = text.chars().filter(|c| *c != '\r' && *c != '\n').collect();
+                    input.push_str(&filtered);
+                }
+                Mode::DirPicker { explorer, .. } => {
+                    if let Some(current) = explorer.search_query().cloned() {
+                        let filtered: String = text.chars().filter(|c| *c != '\r' && *c != '\n').collect();
+                        let _ = explorer
+                            .set_search_query(Some(format!("{}{}", current, filtered)));
                     }
                 }
                 _ => {}

@@ -13,7 +13,10 @@ use std::time::Duration;
 use clap::Parser;
 use crossterm::{
     cursor,
-    event::EventStream,
+    event::{
+        DisableBracketedPaste, EnableBracketedPaste, EventStream, KeyboardEnhancementFlags,
+        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    },
     execute,
     style::{Attribute, Color, SetAttribute, SetBackgroundColor, SetForegroundColor},
     terminal::{self, disable_raw_mode, enable_raw_mode},
@@ -102,6 +105,21 @@ async fn run(cli: Cli) -> std::io::Result<()> {
     execute!(stdout, terminal::EnterAlternateScreen, cursor::Hide)?;
 
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout))?;
+
+    let supports_keyboard_enhancement =
+        matches!(crossterm::terminal::supports_keyboard_enhancement(), Ok(true));
+    if supports_keyboard_enhancement {
+        let _ = execute!(
+            terminal.backend_mut(),
+            PushKeyboardEnhancementFlags(
+                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                    | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+                    | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
+                    | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+            )
+        );
+    }
+    let _ = execute!(terminal.backend_mut(), EnableBracketedPaste);
 
     let pty_system = NativePtySystem::default();
     let mut processes: Vec<Process> = Vec::new();
@@ -245,8 +263,19 @@ async fn run(cli: Cli) -> std::io::Result<()> {
                                 render(&mut terminal, &mode, &entries, &projects, &processes, term_rows, term_cols, confirm_quit, cli.no_worktree)?;
                                 continue;
                             }
-                            execute!(terminal.backend_mut(), cursor::Show, terminal::LeaveAlternateScreen)?;
-                            disable_raw_mode()?;
+                            let _ = execute!(terminal.backend_mut(), DisableBracketedPaste);
+                            if supports_keyboard_enhancement {
+                                let _ = execute!(
+                                    terminal.backend_mut(),
+                                    PopKeyboardEnhancementFlags
+                                );
+                            }
+                            let _ = execute!(
+                                terminal.backend_mut(),
+                                cursor::Show,
+                                terminal::LeaveAlternateScreen
+                            );
+                            let _ = disable_raw_mode();
                             return Ok(());
                         } else {
                             if matches!(mode, Mode::Normal { .. }) {
@@ -266,13 +295,35 @@ async fn run(cli: Cli) -> std::io::Result<()> {
                     }
                     Some(Err(e)) => {
                         eprintln!("Event stream error: {e}. Shutting down.");
-                        execute!(terminal.backend_mut(), cursor::Show, terminal::LeaveAlternateScreen)?;
-                        disable_raw_mode()?;
+                        let _ = execute!(terminal.backend_mut(), DisableBracketedPaste);
+                        if supports_keyboard_enhancement {
+                            let _ = execute!(
+                                terminal.backend_mut(),
+                                PopKeyboardEnhancementFlags
+                            );
+                        }
+                        let _ = execute!(
+                            terminal.backend_mut(),
+                            cursor::Show,
+                            terminal::LeaveAlternateScreen
+                        );
+                        let _ = disable_raw_mode();
                         return Err(e);
                     }
                     None => {
-                        execute!(terminal.backend_mut(), cursor::Show, terminal::LeaveAlternateScreen)?;
-                        disable_raw_mode()?;
+                        let _ = execute!(terminal.backend_mut(), DisableBracketedPaste);
+                        if supports_keyboard_enhancement {
+                            let _ = execute!(
+                                terminal.backend_mut(),
+                                PopKeyboardEnhancementFlags
+                            );
+                        }
+                        let _ = execute!(
+                            terminal.backend_mut(),
+                            cursor::Show,
+                            terminal::LeaveAlternateScreen
+                        );
+                        let _ = disable_raw_mode();
                         return Ok(());
                     }
                 }

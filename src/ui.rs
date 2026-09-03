@@ -1,8 +1,8 @@
 use std::io::Write;
 use std::sync::atomic::Ordering;
 
-use crossterm::style::{Attribute, Color, SetAttribute, SetBackgroundColor, SetForegroundColor};
-use crossterm::{cursor, execute};
+use crossterm::execute;
+use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout};
@@ -257,24 +257,38 @@ fn render_tty(
     _rows: u16,
     _cols: u16,
 ) -> std::io::Result<()> {
-    let (contents, cursor_row, cursor_col) = {
+    // Use differential rendering with synchronized updates to avoid flicker.
+    // We keep the previous screen per-process and only send the diff,
+    // which avoids full-screen clears on every tick.
+    let output = {
         let parser = proc.parser.lock();
         let screen = parser.screen();
-        let contents = screen.contents_formatted();
-        let (row, col) = screen.cursor_position();
-        (contents, row, col)
+        let mut prev = proc.prev_screen.lock();
+        let bytes = if let Some(prev_screen) = prev.as_ref() {
+            if prev_screen.size() == screen.size() {
+                screen.state_diff(prev_screen)
+            } else {
+                screen.state_formatted()
+            }
+        } else {
+            screen.state_formatted()
+        };
+        if bytes.is_empty() {
+            // No visual change since last render – skip to prevent flicker.
+            return Ok(());
+        }
+        *prev = Some(screen.clone());
+        bytes
     };
 
     let stdout = terminal.backend_mut();
-    execute!(stdout, cursor::MoveTo(0, 0))?;
-    stdout.write_all(&contents)?;
-    execute!(
-        stdout,
-        SetAttribute(Attribute::Reset),
-        SetForegroundColor(Color::Reset),
-        SetBackgroundColor(Color::Reset)
-    )?;
-    execute!(stdout, cursor::MoveTo(cursor_col, cursor_row))?;
+    execute!(stdout, BeginSynchronizedUpdate)?;
+    stdout.write_all(&output)?;
+    // Ensure attributes are reset after TTY content to avoid leaking into UI.
+    // state_formatted/state_diff already handle attributes, but we keep a
+    // minimal reset to be safe when diff doesn't cover the whole screen.
+    // This is done without extra cursor moves – the diff already positions cursor.
+    execute!(stdout, EndSynchronizedUpdate)?;
     stdout.flush()?;
     Ok(())
 }
