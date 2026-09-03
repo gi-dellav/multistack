@@ -1,5 +1,5 @@
 use std::io::Read;
-use std::os::unix::net::UnixListener;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::thread::JoinHandle;
@@ -72,18 +72,38 @@ pub fn spawn_status_listener(
         };
         listener.set_nonblocking(true).ok();
 
-        let mut buf = vec![0u8; 1024];
-
         loop {
             match listener.accept() {
-                Ok((mut stream, _)) => {
-                    let n = match stream.read(&mut buf) {
-                        Ok(n) if n > 0 => n,
-                        _ => continue,
-                    };
+                Ok((stream, _)) => {
+                    // Accepted sockets inherit the listener's non-blocking
+                    // mode: a client connects first and writes a moment
+                    // later, so a single non-blocking `read()` would usually
+                    // hit `WouldBlock` and drop the signal. Force blocking
+                    // with a short timeout and drain to EOF instead.
+                    let mut stream: UnixStream = stream;
+                    let _ = stream.set_nonblocking(false);
+                    let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+                    let mut data = Vec::new();
+                    match stream.read_to_end(&mut data) {
+                        Ok(0) => continue, // spurious connect, no payload
+                        Ok(_) => {}
+                        Err(e)
+                            if e.kind() == std::io::ErrorKind::WouldBlock
+                                || e.kind() == std::io::ErrorKind::TimedOut =>
+                        {
+                            continue;
+                        }
+                        Err(_) => continue,
+                    }
+                    if data.is_empty() {
+                        continue;
+                    }
 
-                    let text = String::from_utf8_lossy(&buf[..n]);
-                    for line in text.lines() {
+                    let text = String::from_utf8_lossy(&data);
+                    for raw in text.lines() {
+                        // Trim `\r` too: a client writing `start\r\n`
+                        // would otherwise never match.
+                        let line = raw.trim();
                         match line {
                             "start" => {
                                 status.store(STATUS_WORKING, Ordering::SeqCst);
@@ -95,8 +115,27 @@ pub fn spawn_status_listener(
                                     active_ms
                                         .fetch_add(elapsed.as_millis() as u64, Ordering::SeqCst);
                                 }
-                                if status.load(Ordering::SeqCst) == STATUS_WORKING {
-                                    status.store(STATUS_FINISHED, Ordering::SeqCst);
+                                let prev = status.compare_exchange(
+                                    STATUS_WORKING,
+                                    STATUS_FINISHED,
+                                    Ordering::SeqCst,
+                                    Ordering::SeqCst,
+                                );
+                                // A fast run may deliver `stop` while we are
+                                // still NOT_YET (no `start` observed yet).
+                                let transitioned = if prev.is_ok() {
+                                    true
+                                } else {
+                                    status
+                                        .compare_exchange(
+                                            STATUS_NOT_YET,
+                                            STATUS_FINISHED,
+                                            Ordering::SeqCst,
+                                            Ordering::SeqCst,
+                                        )
+                                        .is_ok()
+                                };
+                                if transitioned {
                                     crate::process::run_speck_apply_if_present(&project_dir);
                                     let name = process_name.lock().clone();
                                     let _ = Notification::new()
@@ -106,6 +145,13 @@ pub fn spawn_status_listener(
                                 }
                             }
                             "git-conflict" => {
+                                // Freeze the timer at the conflict moment so
+                                // the display doesn't keep accruing time.
+                                if let Some(start) = cycle_start.lock().take() {
+                                    let elapsed = start.elapsed();
+                                    active_ms
+                                        .fetch_add(elapsed.as_millis() as u64, Ordering::SeqCst);
+                                }
                                 status.store(STATUS_GIT_CONFLICT, Ordering::SeqCst);
                                 let name = process_name.lock().clone();
                                 let _ = Notification::new()

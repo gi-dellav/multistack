@@ -104,14 +104,15 @@ pub fn process_event(
                 Mode::Prompt { input, .. } => {
                     // Filter out control characters that could trigger unintended actions;
                     // keep printable pasted text for prompt input.
-                    let filtered: String = text.chars().filter(|c| *c != '\r' && *c != '\n').collect();
+                    let filtered: String =
+                        text.chars().filter(|c| *c != '\r' && *c != '\n').collect();
                     input.push_str(&filtered);
                 }
                 Mode::DirPicker { explorer, .. } => {
                     if let Some(current) = explorer.search_query().cloned() {
-                        let filtered: String = text.chars().filter(|c| *c != '\r' && *c != '\n').collect();
-                        let _ = explorer
-                            .set_search_query(Some(format!("{}{}", current, filtered)));
+                        let filtered: String =
+                            text.chars().filter(|c| *c != '\r' && *c != '\n').collect();
+                        let _ = explorer.set_search_query(Some(format!("{}{}", current, filtered)));
                     }
                 }
                 _ => {}
@@ -169,6 +170,18 @@ fn spawn_zerostack(
         ],
         SpawnMode::Bare => vec!["--status-socket", &socket_path],
     };
+    let worktree_dir = match &mode {
+        SpawnMode::Worktree(wt_name) => {
+            let parent = Path::new(project_dir)
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty());
+            match parent {
+                Some(p) => Some(format!("{}/{wt_name}", p.to_string_lossy())),
+                None => Some(format!("./{wt_name}")),
+            }
+        }
+        _ => None,
+    };
     match spawn_process(
         pty_system,
         next_id,
@@ -180,6 +193,7 @@ fn spawn_zerostack(
         term_cols,
         Some(&socket_path),
         project_dir,
+        worktree_dir.as_deref(),
     ) {
         Ok(proc) => {
             if processes.is_empty() {
@@ -197,7 +211,25 @@ fn spawn_zerostack(
 }
 
 fn worktree_name(title: &str) -> String {
-    let sanitized = title.trim().replace([' ', '/', '\\'], "_");
+    let sanitized: String = title
+        .trim()
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let sanitized = sanitized.trim_matches('_');
+    let sanitized = if sanitized.is_empty() {
+        "agent".to_string()
+    } else {
+        sanitized.chars().take(32).collect()
+    };
+    // Second + sub-second granularity: two agents spawned in the same wall
+    // second previously got the same branch name and collided.
     let dur = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
@@ -205,15 +237,43 @@ fn worktree_name(title: &str) -> String {
     let h = (secs / 3600) % 24;
     let m = (secs / 60) % 60;
     let s = secs % 60;
-    format!("wt-{}-{:02}-{:02}-{:02}", sanitized, h, m, s)
+    let sub = dur.subsec_nanos();
+    let pid = std::process::id();
+    // Nanos + pid make same-millisecond spawns unique. A per-process counter
+    // would also work but nanos+pid keeps the name stateless/predictable.
+    static WT_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let ctr = WT_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("wt-{sanitized}-{h:02}-{m:02}-{s:02}-{sub:09}-{pid}-{ctr}")
 }
 
+#[cfg(test)]
 fn worktree_dir(project_dir: &str, wt_name: &str) -> String {
+    // `parent()` returns Some("") for relative paths ("project" -> "") and
+    // None for "/" — both previous cases produced garbage like "/wt-foo".
     let parent = Path::new(project_dir)
         .parent()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|| ".".to_string());
-    format!("{}/{}", parent, wt_name)
+        .filter(|p| !p.as_os_str().is_empty());
+    match parent {
+        Some(p) => format!("{}/{wt_name}", p.to_string_lossy()),
+        None => format!("./{wt_name}"),
+    }
+}
+
+/// Sibling directory a `--worktree` agent is expected to use. Shared with
+/// `spawn_zerostack` above so h/lazygit/shell and speck-apply target the same
+/// path the agent was told to create.
+///
+/// Kept as a free function (wrapping the same parent/sibling logic) so it
+/// stays unit testable without constructing a full `Process`.
+#[allow(dead_code)]
+pub(crate) fn expected_worktree_dir(project_dir: &str, wt_name: &str) -> String {
+    let parent = Path::new(project_dir)
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty());
+    match parent {
+        Some(p) => format!("{}/{wt_name}", p.to_string_lossy()),
+        None => format!("./{wt_name}"),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -253,28 +313,30 @@ fn process_key(
                     }
                 }
                 KeyCode::Char('N') => {
-                    if !no_worktree {
-                        if let Some(project_id) = resolve_project(entries, projects, *selected)
-                            && let Some(dir) = find_project_dir(projects, project_id)
+                    if !no_worktree
+                        && let Some(project_id) = resolve_project(entries, projects, *selected)
+                        && let Some(dir) = find_project_dir(projects, project_id)
+                    {
+                        let new_selected = *selected;
+                        let len_before = processes.len();
+                        spawn_zerostack(
+                            pty_system,
+                            next_id,
+                            processes,
+                            project_id,
+                            &dir,
+                            None,
+                            SpawnMode::Parallel,
+                            term_rows,
+                            term_cols,
+                            selected,
+                        );
+                        if processes.len() > len_before
+                            && let Some(proc) = processes.last()
                         {
-                            let new_selected = *selected;
-                            spawn_zerostack(
-                                pty_system,
-                                next_id,
-                                processes,
-                                project_id,
-                                &dir,
-                                None,
-                                SpawnMode::Parallel,
-                                term_rows,
-                                term_cols,
-                                selected,
-                            );
-                            if let Some(proc) = processes.last() {
-                                let pid = proc.id;
-                                *selected = new_selected;
-                                *mode = Mode::Tty { process_id: pid };
-                            }
+                            let pid = proc.id;
+                            *selected = new_selected;
+                            *mode = Mode::Tty { process_id: pid };
                         }
                     }
                 }
@@ -307,12 +369,20 @@ fn process_key(
                 }
                 KeyCode::Char('l') => {
                     if let Some(project_id) = resolve_project(entries, projects, *selected) {
-                        let header_idx = entries[..=*selected]
-                        .iter()
-                        .rposition(|e| matches!(e, ListEntry::ProjectHeader(pid) if *pid == project_id))
-                        .unwrap_or(0);
+                        let header_idx = if entries.is_empty() || *selected >= entries.len() {
+                            0
+                        } else {
+                            entries[..=*selected]
+                            .iter()
+                            .rposition(|e| matches!(e, ListEntry::ProjectHeader(pid) if *pid == project_id))
+                            .unwrap_or(0)
+                        };
                         if let Some(dir) = find_project_dir(projects, project_id) {
                             run_speck_apply_if_present(&dir);
+                        }
+                        // Also flush any agent worktrees under this project.
+                        for p in processes.iter().filter(|p| p.project_id == project_id) {
+                            run_speck_apply_if_present(&p.effective_dir());
                         }
                         processes.retain(|p| p.project_id != project_id);
                         projects.retain(|p| p.id != project_id);
@@ -330,12 +400,8 @@ fn process_key(
                             && let ListEntry::Agent(proc_id) = entries[*selected]
                             && let Some(proc) = processes.iter().find(|p| p.id == proc_id)
                         {
-                            let wt_dir = worktree_dir(&dir, &proc.name);
-                            if Path::new(&wt_dir).is_dir() {
-                                wt_dir
-                            } else {
-                                dir
-                            }
+                            let eff = proc.effective_dir();
+                            if Path::new(&eff).is_dir() { eff } else { dir }
                         } else {
                             dir
                         };
@@ -350,8 +416,9 @@ fn process_key(
                         ) {
                             Ok(mut process) => {
                                 process.kill_on_drop = true;
+                                process.project_dir = target_dir.clone();
                                 *mode = Mode::TempTty {
-                                    process,
+                                    process: Box::new(process),
                                     previous_selected: *selected,
                                 };
                             }
@@ -372,12 +439,8 @@ fn process_key(
                             && let ListEntry::Agent(proc_id) = entries[*selected]
                             && let Some(proc) = processes.iter().find(|p| p.id == proc_id)
                         {
-                            let wt_dir = worktree_dir(&dir, &proc.name);
-                            if Path::new(&wt_dir).is_dir() {
-                                wt_dir
-                            } else {
-                                dir
-                            }
+                            let eff = proc.effective_dir();
+                            if Path::new(&eff).is_dir() { eff } else { dir }
                         } else {
                             dir
                         };
@@ -393,8 +456,9 @@ fn process_key(
                         ) {
                             Ok(mut process) => {
                                 process.kill_on_drop = true;
+                                process.project_dir = target_dir.clone();
                                 *mode = Mode::TempTty {
-                                    process,
+                                    process: Box::new(process),
                                     previous_selected: *selected,
                                 };
                             }
@@ -457,9 +521,11 @@ fn process_key(
                     }
                 }
                 KeyCode::PageUp => {
-                    if let Some(idx) = entries[..*selected]
-                        .iter()
-                        .rposition(|e| matches!(e, ListEntry::ProjectHeader(_)))
+                    if !entries.is_empty()
+                        && *selected < entries.len()
+                        && let Some(idx) = entries[..*selected]
+                            .iter()
+                            .rposition(|e| matches!(e, ListEntry::ProjectHeader(_)))
                     {
                         *selected = idx;
                     }
@@ -482,7 +548,13 @@ fn process_key(
             let pid = *process_id;
             match key.code {
                 KeyCode::Esc => {
-                    let idx = processes.iter().position(|p| p.id == pid).unwrap_or(0);
+                    // `processes` order != visible list order (headers
+                    // interleave in `entries`): translate the pid back to the
+                    // list index so Esc lands the cursor on the right row.
+                    let idx = entries
+                        .iter()
+                        .position(|e| matches!(e, ListEntry::Agent(id) if *id == pid))
+                        .unwrap_or(0);
                     *mode = Mode::Normal { selected: idx };
                 }
                 _ => {
@@ -530,6 +602,7 @@ fn process_key(
             KeyCode::Enter => {
                 let title = std::mem::take(input);
                 let title = title.trim().to_string();
+                let len_before = processes.len();
                 match purpose {
                     crate::PromptPurpose::NewProcess(project_id) => {
                         let pid = *project_id;
@@ -584,23 +657,33 @@ fn process_key(
                         if !title.is_empty() {
                             let path = Path::new(&title);
                             if path.is_dir() {
-                                let name = path
-                                    .file_name()
-                                    .and_then(|n| n.to_str())
-                                    .unwrap_or(&title)
-                                    .to_string();
                                 let dir = path
                                     .canonicalize()
                                     .map(|p| p.to_string_lossy().to_string())
                                     .unwrap_or_else(|_| title.to_string());
-                                projects.push(Project {
-                                    id: *next_project_id,
-                                    name,
-                                    directory: dir,
-                                });
-                                *next_project_id += 1;
-                                if !dont_save {
-                                    let _ = save_projects(projects);
+                                // Canonicalize before comparing: the same dir
+                                // typed as `~/proj` vs `/home/u/proj` or with
+                                // a trailing slash must not create duplicates.
+                                if projects.iter().any(|p| p.directory == dir) {
+                                    let _ = notify_rust::Notification::new()
+                                        .summary("Project already added")
+                                        .body(&dir)
+                                        .show();
+                                } else {
+                                    let name = Path::new(&dir)
+                                        .file_name()
+                                        .and_then(|n| n.to_str())
+                                        .unwrap_or(&dir)
+                                        .to_string();
+                                    projects.push(Project {
+                                        id: *next_project_id,
+                                        name,
+                                        directory: dir,
+                                    });
+                                    *next_project_id += 1;
+                                    if !dont_save {
+                                        let _ = save_projects(projects);
+                                    }
                                 }
                             } else {
                                 let _ = notify_rust::Notification::new()
@@ -623,14 +706,23 @@ fn process_key(
                 }
                 match purpose {
                     crate::PromptPurpose::NewBareProcess(_) => {
-                        if let Some(proc) = processes.last() {
+                        // Only enter the TTY when this spawn actually
+                        // succeeded; a failed spawn (bad $SHELL, missing
+                        // binary, PTY error) must return to the list instead
+                        // of attaching to a stale pre-existing agent.
+                        if processes.len() > len_before
+                            && let Some(proc) = processes.last()
+                        {
                             let pid = proc.id;
                             *mode = Mode::Tty { process_id: pid };
+                        } else {
+                            *mode = Mode::Normal {
+                                selected: *selected,
+                            };
                         }
                     }
                     _ => {
-                        let new_selected =
-                            if processes.is_empty() { 0 } else { *selected };
+                        let new_selected = if processes.is_empty() { 0 } else { *selected };
                         *mode = Mode::Normal {
                             selected: new_selected,
                         };
@@ -690,7 +782,7 @@ fn process_key(
                             .canonicalize()
                             .map(|p| p.to_string_lossy().to_string())
                             .unwrap_or_else(|_| path.to_string_lossy().to_string());
-                        let name = path
+                        let name = Path::new(&canonical)
                             .file_name()
                             .and_then(|n| n.to_str())
                             .unwrap_or(&canonical)
@@ -699,14 +791,21 @@ fn process_key(
                     } else {
                         return Ok(false);
                     };
-                    projects.push(Project {
-                        id: *next_project_id,
-                        name,
-                        directory: dir,
-                    });
-                    *next_project_id += 1;
-                    if !dont_save {
-                        let _ = save_projects(projects);
+                    if projects.iter().any(|p| p.directory == dir) {
+                        let _ = notify_rust::Notification::new()
+                            .summary("Project already added")
+                            .body(&dir)
+                            .show();
+                    } else {
+                        projects.push(Project {
+                            id: *next_project_id,
+                            name,
+                            directory: dir,
+                        });
+                        *next_project_id += 1;
+                        if !dont_save {
+                            let _ = save_projects(projects);
+                        }
                     }
                     *mode = Mode::Normal {
                         selected: *previous_selected,
@@ -872,9 +971,15 @@ mod tests {
     #[test]
     fn test_enter_modifiers() {
         assert_eq!(key_to_bytes(&kc(KeyCode::Enter)), b"\r");
-        assert_eq!(key_to_bytes(&shift(KeyCode::Enter)), vec![0x1b, b'[', b'1', b'3', b';', b'2', b'u']);
+        assert_eq!(
+            key_to_bytes(&shift(KeyCode::Enter)),
+            vec![0x1b, b'[', b'1', b'3', b';', b'2', b'u']
+        );
         assert_eq!(key_to_bytes(&alt(KeyCode::Enter)), vec![0x1b, b'\r']);
-        assert_eq!(key_to_bytes(&ctrl(KeyCode::Enter)), vec![0x1b, b'[', b'1', b'3', b';', b'5', b'u']);
+        assert_eq!(
+            key_to_bytes(&ctrl(KeyCode::Enter)),
+            vec![0x1b, b'[', b'1', b'3', b';', b'5', b'u']
+        );
     }
 
     #[test]
@@ -890,14 +995,38 @@ mod tests {
         assert_eq!(key_to_bytes(&kc(KeyCode::F(2))), vec![0x1b, b'O', b'Q']);
         assert_eq!(key_to_bytes(&kc(KeyCode::F(3))), vec![0x1b, b'O', b'R']);
         assert_eq!(key_to_bytes(&kc(KeyCode::F(4))), vec![0x1b, b'O', b'S']);
-        assert_eq!(key_to_bytes(&kc(KeyCode::F(5))), vec![0x1b, b'[', b'1', b'5', b'~']);
-        assert_eq!(key_to_bytes(&kc(KeyCode::F(6))), vec![0x1b, b'[', b'1', b'7', b'~']);
-        assert_eq!(key_to_bytes(&kc(KeyCode::F(7))), vec![0x1b, b'[', b'1', b'8', b'~']);
-        assert_eq!(key_to_bytes(&kc(KeyCode::F(8))), vec![0x1b, b'[', b'1', b'9', b'~']);
-        assert_eq!(key_to_bytes(&kc(KeyCode::F(9))), vec![0x1b, b'[', b'2', b'0', b'~']);
-        assert_eq!(key_to_bytes(&kc(KeyCode::F(10))), vec![0x1b, b'[', b'2', b'1', b'~']);
-        assert_eq!(key_to_bytes(&kc(KeyCode::F(11))), vec![0x1b, b'[', b'2', b'3', b'~']);
-        assert_eq!(key_to_bytes(&kc(KeyCode::F(12))), vec![0x1b, b'[', b'2', b'4', b'~']);
+        assert_eq!(
+            key_to_bytes(&kc(KeyCode::F(5))),
+            vec![0x1b, b'[', b'1', b'5', b'~']
+        );
+        assert_eq!(
+            key_to_bytes(&kc(KeyCode::F(6))),
+            vec![0x1b, b'[', b'1', b'7', b'~']
+        );
+        assert_eq!(
+            key_to_bytes(&kc(KeyCode::F(7))),
+            vec![0x1b, b'[', b'1', b'8', b'~']
+        );
+        assert_eq!(
+            key_to_bytes(&kc(KeyCode::F(8))),
+            vec![0x1b, b'[', b'1', b'9', b'~']
+        );
+        assert_eq!(
+            key_to_bytes(&kc(KeyCode::F(9))),
+            vec![0x1b, b'[', b'2', b'0', b'~']
+        );
+        assert_eq!(
+            key_to_bytes(&kc(KeyCode::F(10))),
+            vec![0x1b, b'[', b'2', b'1', b'~']
+        );
+        assert_eq!(
+            key_to_bytes(&kc(KeyCode::F(11))),
+            vec![0x1b, b'[', b'2', b'3', b'~']
+        );
+        assert_eq!(
+            key_to_bytes(&kc(KeyCode::F(12))),
+            vec![0x1b, b'[', b'2', b'4', b'~']
+        );
         // Unknown F key should be empty
         assert_eq!(key_to_bytes(&kc(KeyCode::F(20))), Vec::<u8>::new());
     }
@@ -909,18 +1038,33 @@ mod tests {
         assert_eq!(key_to_bytes(&kc(KeyCode::Right)), vec![0x1b, b'[', b'C']);
         assert_eq!(key_to_bytes(&kc(KeyCode::Home)), vec![0x1b, b'[', b'H']);
         assert_eq!(key_to_bytes(&kc(KeyCode::End)), vec![0x1b, b'[', b'F']);
-        assert_eq!(key_to_bytes(&kc(KeyCode::Insert)), vec![0x1b, b'[', b'2', b'~']);
-        assert_eq!(key_to_bytes(&kc(KeyCode::PageUp)), vec![0x1b, b'[', b'5', b'~']);
-        assert_eq!(key_to_bytes(&kc(KeyCode::PageDown)), vec![0x1b, b'[', b'6', b'~']);
+        assert_eq!(
+            key_to_bytes(&kc(KeyCode::Insert)),
+            vec![0x1b, b'[', b'2', b'~']
+        );
+        assert_eq!(
+            key_to_bytes(&kc(KeyCode::PageUp)),
+            vec![0x1b, b'[', b'5', b'~']
+        );
+        assert_eq!(
+            key_to_bytes(&kc(KeyCode::PageDown)),
+            vec![0x1b, b'[', b'6', b'~']
+        );
     }
 
     #[test]
     fn test_key_to_bytes_ctrl_shift_handling() {
         // Ctrl+Shift+C should still be Ctrl+C (3)
-        let mut key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL | KeyModifiers::SHIFT);
+        let mut key = KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        );
         // crossterm reports Char as lowercase even with shift? but we handle both
         assert_eq!(key_to_bytes(&key), vec![3]);
-        key = KeyEvent::new(KeyCode::Char('C'), KeyModifiers::CONTROL | KeyModifiers::SHIFT);
+        key = KeyEvent::new(
+            KeyCode::Char('C'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        );
         assert_eq!(key_to_bytes(&key), vec![3]);
         // Ctrl+2 -> NUL
         assert_eq!(key_to_bytes(&ctrl(KeyCode::Char('2'))), vec![0x00]);
@@ -940,12 +1084,19 @@ mod tests {
 
     #[test]
     fn test_worktree_helpers() {
-        assert!(worktree_name("hello world").starts_with("wt-hello_world-"));
-        assert!(worktree_name("  spaced  ").starts_with("wt-spaced-"));
+        let n1 = worktree_name("hello world");
+        assert!(n1.starts_with("wt-hello_world-"), "{n1}");
+        // No spaces/slashes/backslashes survive sanitization.
+        assert!(!n1.chars().any(|c| c == ' ' || c == '/' || c == '\\'));
         assert!(worktree_name("a/b\\c").contains("a_b_c"));
-        assert_eq!(worktree_dir("/home/user/project", "wt-foo"), "/home/user/wt-foo");
-        // "project" has empty parent -> "/wt-foo" per current logic
-        assert_eq!(worktree_dir("project", "wt-foo"), "/wt-foo");
+        // Same title twice must not collide (ms + pid suffix).
+        assert_ne!(worktree_name("dup"), worktree_name("dup"));
+        assert_eq!(
+            worktree_dir("/home/user/project", "wt-foo"),
+            "/home/user/wt-foo"
+        );
+        // Relative path has no parent -> sibling in cwd.
+        assert_eq!(worktree_dir("project", "wt-foo"), "./wt-foo");
         // "/" has no parent -> fallback to "."
         assert_eq!(worktree_dir("/", "wt-foo"), "./wt-foo");
         // Normal case
@@ -966,11 +1117,15 @@ mod tests {
         }
     }
 
-    fn make_capture_process(id: usize, buf: std::sync::Arc<parking_lot::Mutex<Vec<u8>>>) -> Process {
+    fn make_capture_process(
+        id: usize,
+        buf: std::sync::Arc<parking_lot::Mutex<Vec<u8>>>,
+    ) -> Process {
         Process {
             id,
             project_id: 1,
             project_dir: "/tmp".into(),
+            worktree_dir: None,
             name: format!("test{id}"),
             child: None,
             master: None,
@@ -1028,7 +1183,7 @@ mod tests {
         let buf = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
         let proc = make_capture_process(0, buf.clone());
         let mut mode = crate::Mode::TempTty {
-            process: proc,
+            process: Box::new(proc),
             previous_selected: 0,
         };
         let mut processes = vec![];
@@ -1111,7 +1266,11 @@ mod tests {
     fn test_paste_normal_ignored() {
         let mut mode = crate::Mode::Normal { selected: 0 };
         let mut processes = vec![];
-        let mut projects = vec![crate::project::Project { id: 1, name: "proj".into(), directory: "/tmp".into() }];
+        let mut projects = vec![crate::project::Project {
+            id: 1,
+            name: "proj".into(),
+            directory: "/tmp".into(),
+        }];
         let mut next_pid = 2usize;
         let mut next_id = 1usize;
         let pty_system = portable_pty::NativePtySystem::default();
@@ -1187,7 +1346,8 @@ mod tests {
 
     #[test]
     fn test_process_event_resize_clears_prev_screen_and_updates_sizes() {
-        let proc = make_capture_process(1, std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())));
+        let proc =
+            make_capture_process(1, std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())));
         // Simulate some screen content and cache
         {
             let mut parser = proc.parser.lock();
@@ -1241,7 +1401,10 @@ mod tests {
             let screen = parser.screen().clone();
             *proc.prev_screen.lock() = Some(screen);
         }
-        let mut mode = crate::Mode::TempTty { process: proc, previous_selected: 5 };
+        let mut mode = crate::Mode::TempTty {
+            process: Box::new(proc),
+            previous_selected: 5,
+        };
         let mut processes = vec![];
         let mut projects = vec![];
         let mut next_pid = 2usize;
@@ -1283,7 +1446,11 @@ mod tests {
         let proc = make_capture_process(5, buf);
         let mut processes = vec![proc];
         let mut mode = crate::Mode::Tty { process_id: 5 };
-        let mut projects = vec![crate::project::Project { id: 1, name: "p".into(), directory: "/tmp".into() }];
+        let mut projects = vec![crate::project::Project {
+            id: 1,
+            name: "p".into(),
+            directory: "/tmp".into(),
+        }];
         let entries = crate::project::build_entries(&projects, &processes);
         let mut next_pid = 2usize;
         let mut next_id = 10usize;
@@ -1367,8 +1534,12 @@ mod tests {
 
     #[test]
     fn test_temptty_esc_returns() {
-        let proc = make_capture_process(0, std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())));
-        let mut mode = crate::Mode::TempTty { process: proc, previous_selected: 3 };
+        let proc =
+            make_capture_process(0, std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())));
+        let mut mode = crate::Mode::TempTty {
+            process: Box::new(proc),
+            previous_selected: 3,
+        };
         let mut processes = vec![];
         let mut projects = vec![];
         let mut next_pid = 2usize;
@@ -1399,7 +1570,8 @@ mod tests {
 
     #[test]
     fn test_paste_tty_no_writer_does_not_panic() {
-        let mut proc = make_capture_process(1, std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())));
+        let mut proc =
+            make_capture_process(1, std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())));
         proc.master_writer = None;
         let mut processes = vec![proc];
         let mut mode = crate::Mode::Tty { process_id: 1 };

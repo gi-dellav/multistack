@@ -16,6 +16,9 @@ pub struct Process {
     pub id: usize,
     pub project_id: usize,
     pub project_dir: String,
+    /// Expected worktree directory for `--worktree` agents (sibling of
+    /// `project_dir`). `None` for bare/parallel/temporary processes.
+    pub worktree_dir: Option<String>,
     pub name: String,
     pub child: Option<Box<dyn portable_pty::Child + Send>>,
     pub master: Option<Box<dyn portable_pty::MasterPty + Send>>,
@@ -33,26 +36,68 @@ pub struct Process {
     pub prev_screen: Arc<Mutex<Option<vt100::Screen>>>,
 }
 
+impl Process {
+    /// Directory the agent actually works in: the worktree when one was
+    /// requested (even if it hasn't been created yet), else the project dir.
+    pub fn effective_dir(&self) -> String {
+        self.worktree_dir
+            .clone()
+            .unwrap_or_else(|| self.project_dir.clone())
+    }
+}
+
 impl Drop for Process {
     fn drop(&mut self) {
         if let Some(ref flag) = self.shutdown_flag {
             flag.store(true, Ordering::SeqCst);
         }
         if let Some(handle) = self.listener_thread.take() {
-            let _ = handle.join();
+            // The listener polls the shutdown flag every 100ms; give it a
+            // bounded grace period so a wedged socket can't freeze the UI.
+            let deadline = Instant::now() + std::time::Duration::from_secs(1);
+            while !handle.is_finished() && Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            if handle.is_finished() {
+                let _ = handle.join();
+            }
+            // If still running, detach: the thread owns only Arcs + the
+            // socket path and exits on its next poll.
         }
         if let Some(ref path) = self.status_socket_path {
             let _ = std::fs::remove_file(path);
         }
-        if self.kill_on_drop
-            && let Some(ref mut child) = self.child
-        {
+        // Always terminate the child before waiting: a `d`/`l`/quit on a
+        // still-running agent must not orphan it, and an unconditional
+        // blocking `wait()` on a live interactive child would freeze the UI.
+        // `kill` on an already-dead child is a harmless no-op error.
+        if let Some(ref mut child) = self.child {
             let _ = child.kill();
         }
         drop(self.master_writer.take());
         drop(self.master.take());
         if let Some(ref mut child) = self.child {
-            let _ = child.wait();
+            // Bounded reap: `wait()` blocks until the child exits, so poll
+            // `try_wait()` first and only block briefly.
+            let deadline = Instant::now() + std::time::Duration::from_millis(500);
+            loop {
+                match child.try_wait() {
+                    Ok(Some(_)) => break,
+                    Ok(None) => {
+                        if Instant::now() >= deadline {
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(_) => break,
+                }
+            }
+            // The child is dead or reaped above; `wait()` now returns
+            // immediately. If the deadline expired with a live child (e.g.
+            // ignoring SIGKILL), detach it rather than hanging the TUI.
+            if matches!(child.try_wait(), Ok(Some(_)) | Err(_)) {
+                let _ = child.wait();
+            }
         }
     }
 }
@@ -104,6 +149,9 @@ pub fn spawn_pty(
     cols: u16,
     cwd: &str,
 ) -> std::io::Result<Process> {
+    // portable-pty rejects 0x0 sizes; clamp to vt100-compatible minimums.
+    let rows = rows.max(1);
+    let cols = cols.max(1);
     let pair = pty_system
         .openpty(PtySize {
             rows,
@@ -163,6 +211,7 @@ pub fn spawn_pty(
         id: 0,
         project_id: 0,
         project_dir: String::new(),
+        worktree_dir: None,
         name,
         child: Some(child),
         master: Some(pair.master),
@@ -193,6 +242,7 @@ pub fn spawn_process(
     cols: u16,
     status_socket: Option<&str>,
     cwd: &str,
+    worktree_dir: Option<&str>,
 ) -> std::io::Result<Process> {
     let id = *next_id;
     *next_id += 1;
@@ -201,6 +251,7 @@ pub fn spawn_process(
     proc.id = id;
     proc.project_id = project_id;
     proc.project_dir = cwd.to_string();
+    proc.worktree_dir = worktree_dir.map(|s| s.to_string());
 
     let (status_socket_path, shutdown_flag, listener_thread) = if let Some(path) = status_socket {
         let name_shared = Arc::new(Mutex::new(proc.name.clone()));
@@ -251,16 +302,35 @@ pub fn run_speck_apply_if_present(dir: &str) {
 
 pub fn sync_statuses(processes: &[Process]) {
     for p in processes {
-        if !p.alive.load(Ordering::SeqCst)
-            && p.status.load(Ordering::SeqCst) == status::STATUS_WORKING
+        if p.alive.load(Ordering::SeqCst) {
+            continue;
+        }
+        let status = p.status.load(Ordering::SeqCst);
+        // Anything that never reported `stop` still holds an open cycle;
+        // credit it before freezing the timer so elapsed time isn't lost.
+        // NOT_YET (never started) means "dead on arrival" -> [X].
+        if status == status::STATUS_WORKING
+            || status == status::STATUS_NOT_YET
+            || status == status::STATUS_GIT_CONFLICT
         {
             if let Some(start) = p.cycle_start.lock().take() {
                 let elapsed = start.elapsed();
                 p.active_ms
                     .fetch_add(elapsed.as_millis() as u64, Ordering::SeqCst);
             }
-            p.status.store(status::STATUS_DEAD, Ordering::SeqCst);
+            if status != status::STATUS_GIT_CONFLICT {
+                p.status.store(status::STATUS_DEAD, Ordering::SeqCst);
+            }
+            if status == status::STATUS_GIT_CONFLICT {
+                continue;
+            }
             run_speck_apply_if_present(&p.project_dir);
+            if p.worktree_dir
+                .as_deref()
+                .is_some_and(|d| d != p.project_dir)
+            {
+                run_speck_apply_if_present(&p.effective_dir());
+            }
             #[cfg(not(test))]
             {
                 let _ = Notification::new()
@@ -291,6 +361,7 @@ mod tests {
             id: 1,
             project_id: 1,
             project_dir: String::new(),
+            worktree_dir: None,
             name: "test [1]".into(),
             child: None,
             master: None,
@@ -452,7 +523,7 @@ mod tests {
         let proc = make_test_process(false, status::STATUS_NOT_YET, 0, false);
         proc.alive.store(false, Ordering::SeqCst);
         let mode = crate::Mode::TempTty {
-            process: proc,
+            process: Box::new(proc),
             previous_selected: 3,
         };
         let mut processes = vec![];
@@ -465,7 +536,7 @@ mod tests {
         let proc = make_test_process(true, status::STATUS_NOT_YET, 0, false);
         proc.alive.store(true, Ordering::SeqCst);
         let mode = crate::Mode::TempTty {
-            process: proc,
+            process: Box::new(proc),
             previous_selected: 2,
         };
         let mut processes = vec![];

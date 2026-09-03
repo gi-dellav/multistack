@@ -31,7 +31,7 @@ use persistence::load_project_dirs;
 use process::{Process, check_tty_alive, sync_statuses};
 use project::{Project, build_entries};
 use status::STATUS_GIT_CONFLICT;
-use ui::render;
+use ui::{enter_tty_real, exit_temp_tty_real, exit_tty_real, render, wipe_real};
 
 #[derive(Parser)]
 #[command(
@@ -77,7 +77,7 @@ enum Mode {
         process_id: usize,
     },
     TempTty {
-        process: Process,
+        process: Box<Process>,
         previous_selected: usize,
     },
     Prompt {
@@ -106,8 +106,10 @@ async fn run(cli: Cli) -> std::io::Result<()> {
 
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout))?;
 
-    let supports_keyboard_enhancement =
-        matches!(crossterm::terminal::supports_keyboard_enhancement(), Ok(true));
+    let supports_keyboard_enhancement = matches!(
+        crossterm::terminal::supports_keyboard_enhancement(),
+        Ok(true)
+    );
     if supports_keyboard_enhancement {
         let _ = execute!(
             terminal.backend_mut(),
@@ -181,6 +183,26 @@ async fn run(cli: Cli) -> std::io::Result<()> {
         let was_tty = matches!(mode, Mode::Tty { .. } | Mode::TempTty { .. });
 
         if let Some(restore_selected) = check_tty_alive(&mode, &mut processes) {
+            // The child died while we were showing its raw output: the
+            // physical screen still holds TTY content. Restore TUI ownership
+            // before the next draw, or TTY rows leak into the list view.
+            match &mode {
+                Mode::Tty { process_id } => {
+                    if let Some(proc) = processes.iter().find(|p| p.id == *process_id) {
+                        let _ = exit_tty_real(&mut terminal, proc);
+                    } else {
+                        // Process already reaped: still need a bare cleanup
+                        // (no prev_screen to invalidate, just screen state).
+                        // `wipe_real`, not `terminal.clear()` — the latter
+                        // blocks on a cursor-position query (~500ms).
+                        let _ = wipe_real(&mut terminal);
+                    }
+                }
+                Mode::TempTty { process, .. } => {
+                    let _ = exit_temp_tty_real(&mut terminal, &process.prev_screen);
+                }
+                _ => {}
+            }
             mode = Mode::Normal {
                 selected: restore_selected,
             };
@@ -193,8 +215,11 @@ async fn run(cli: Cli) -> std::io::Result<()> {
                 SetForegroundColor(Color::Reset),
                 SetBackgroundColor(Color::Reset)
             )?;
-            let area = terminal.get_frame().area();
-            terminal.resize(area)?;
+            // NOTE: no `terminal.resize()` here — `exit_tty_real` /
+            // `exit_temp_tty_real` / `wipe_real` already reset both buffers,
+            // and `resize()` only re-syncs bookkeeping without repainting.
+            // (`resize()` itself is cheap, but the old `terminal.clear()` in
+            // this path was the blocking call; keep this path query-free.)
         }
 
         let entries = build_entries(&projects, &processes);
@@ -217,6 +242,15 @@ async fn run(cli: Cli) -> std::io::Result<()> {
                 match maybe_event {
                     Some(Ok(event)) => {
                         let was_tty_before_event = matches!(mode, Mode::Tty { .. } | Mode::TempTty { .. });
+                        // Snapshot the TTY identity *before* dispatch: after
+                        // `process_event` runs, `mode` may already be the new
+                        // mode and we can no longer tell which process's cache
+                        // to invalidate.
+                        let exited_tty_pid = match &mode {
+                            Mode::Tty { process_id } => Some(*process_id),
+                            _ => None,
+                        };
+                        let was_temp_tty = matches!(mode, Mode::TempTty { .. });
 
                         let should_quit = process_event(
                             &mut mode,
@@ -234,17 +268,56 @@ async fn run(cli: Cli) -> std::io::Result<()> {
                             confirm_quit,
                         )?;
 
+                        // Any transition *into* a TTY mode must start from a
+                        // blank physical screen with a dropped diff cache, or
+                        // the first frame diffs TTY content against the stale
+                        // TUI screen (= mixed TUI/TTY rendering). TTY(A) ->
+                        // TTY(B) (e.g. re-entering after spawn) needs the same
+                        // fresh full repaint for the new child.
+                        let entered_tty: Option<usize> = match &mode {
+                            Mode::Tty { process_id }
+                                if !was_tty_before_event || Some(*process_id) != exited_tty_pid =>
+                            {
+                                Some(*process_id)
+                            }
+                            _ => None,
+                        };
+                        if let Some(pid) = entered_tty {
+                            if let Some(proc) = processes.iter().find(|p| p.id == pid) {
+                                let _ = enter_tty_real(&mut terminal, proc);
+                            }
+                        } else if matches!(mode, Mode::TempTty { .. }) && !was_tty_before_event
+                            && let Mode::TempTty { process, .. } = &mode
+                        {
+                            let _ = enter_tty_real(&mut terminal, process);
+                        }
+
                         if was_tty_before_event && matches!(mode, Mode::Normal { .. }) {
                             suppress_quit = true;
                             confirm_quit = false;
+                            // Leaving raw mode: the physical screen holds TTY
+                            // content and the vt100 cache describes it. Either
+                            // must be discarded before the TUI redraws.
+                            // (`wipe_real`, not `terminal.clear()` — the
+                            // latter blocks ~500ms on a cursor query.)
+                            if let Some(pid) = exited_tty_pid {
+                                if let Some(proc) = processes.iter().find(|p| p.id == pid) {
+                                    let _ = exit_tty_real(&mut terminal, proc);
+                                } else {
+                                    let _ = wipe_real(&mut terminal);
+                                }
+                            } else if was_temp_tty {
+                                // TempTty's Process was moved out of `mode`
+                                // already; fall back to a bare wipe — its
+                                // cache dies with the value.
+                                let _ = wipe_real(&mut terminal);
+                            }
                             execute!(
                                 terminal.backend_mut(),
                                 SetAttribute(Attribute::Reset),
                                 SetForegroundColor(Color::Reset),
                                 SetBackgroundColor(Color::Reset)
                             )?;
-                            let area = terminal.get_frame().area();
-                            terminal.resize(area)?;
                             let entries = build_entries(&projects, &processes);
                             sync_statuses(&processes);
                             render(&mut terminal, &mode, &entries, &projects, &processes, term_rows, term_cols, confirm_quit, cli.no_worktree)?;

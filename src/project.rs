@@ -70,6 +70,7 @@ mod tests {
             id,
             project_id,
             project_dir: format!("/tmp/proj{project_id}"),
+            worktree_dir: None,
             name: format!("agent{id}"),
             child: None,
             master: None,
@@ -89,7 +90,11 @@ mod tests {
     }
 
     fn make_proj(id: usize, name: &str) -> Project {
-        Project { id, name: name.into(), directory: format!("/tmp/{name}") }
+        Project {
+            id,
+            name: name.into(),
+            directory: format!("/tmp/{name}"),
+        }
     }
 
     #[test]
