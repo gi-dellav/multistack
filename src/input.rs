@@ -881,4 +881,669 @@ mod tests {
     fn test_null_and_unknown() {
         assert_eq!(key_to_bytes(&kc(KeyCode::Null)), Vec::<u8>::new());
     }
+
+    // ---- Additional TTY logic tests ----
+
+    #[test]
+    fn test_f_keys_all() {
+        assert_eq!(key_to_bytes(&kc(KeyCode::F(1))), vec![0x1b, b'O', b'P']);
+        assert_eq!(key_to_bytes(&kc(KeyCode::F(2))), vec![0x1b, b'O', b'Q']);
+        assert_eq!(key_to_bytes(&kc(KeyCode::F(3))), vec![0x1b, b'O', b'R']);
+        assert_eq!(key_to_bytes(&kc(KeyCode::F(4))), vec![0x1b, b'O', b'S']);
+        assert_eq!(key_to_bytes(&kc(KeyCode::F(5))), vec![0x1b, b'[', b'1', b'5', b'~']);
+        assert_eq!(key_to_bytes(&kc(KeyCode::F(6))), vec![0x1b, b'[', b'1', b'7', b'~']);
+        assert_eq!(key_to_bytes(&kc(KeyCode::F(7))), vec![0x1b, b'[', b'1', b'8', b'~']);
+        assert_eq!(key_to_bytes(&kc(KeyCode::F(8))), vec![0x1b, b'[', b'1', b'9', b'~']);
+        assert_eq!(key_to_bytes(&kc(KeyCode::F(9))), vec![0x1b, b'[', b'2', b'0', b'~']);
+        assert_eq!(key_to_bytes(&kc(KeyCode::F(10))), vec![0x1b, b'[', b'2', b'1', b'~']);
+        assert_eq!(key_to_bytes(&kc(KeyCode::F(11))), vec![0x1b, b'[', b'2', b'3', b'~']);
+        assert_eq!(key_to_bytes(&kc(KeyCode::F(12))), vec![0x1b, b'[', b'2', b'4', b'~']);
+        // Unknown F key should be empty
+        assert_eq!(key_to_bytes(&kc(KeyCode::F(20))), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn test_all_special_keys_bytes() {
+        assert_eq!(key_to_bytes(&kc(KeyCode::BackTab)), vec![0x1b, b'[', b'Z']);
+        assert_eq!(key_to_bytes(&kc(KeyCode::Left)), vec![0x1b, b'[', b'D']);
+        assert_eq!(key_to_bytes(&kc(KeyCode::Right)), vec![0x1b, b'[', b'C']);
+        assert_eq!(key_to_bytes(&kc(KeyCode::Home)), vec![0x1b, b'[', b'H']);
+        assert_eq!(key_to_bytes(&kc(KeyCode::End)), vec![0x1b, b'[', b'F']);
+        assert_eq!(key_to_bytes(&kc(KeyCode::Insert)), vec![0x1b, b'[', b'2', b'~']);
+        assert_eq!(key_to_bytes(&kc(KeyCode::PageUp)), vec![0x1b, b'[', b'5', b'~']);
+        assert_eq!(key_to_bytes(&kc(KeyCode::PageDown)), vec![0x1b, b'[', b'6', b'~']);
+    }
+
+    #[test]
+    fn test_key_to_bytes_ctrl_shift_handling() {
+        // Ctrl+Shift+C should still be Ctrl+C (3)
+        let mut key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL | KeyModifiers::SHIFT);
+        // crossterm reports Char as lowercase even with shift? but we handle both
+        assert_eq!(key_to_bytes(&key), vec![3]);
+        key = KeyEvent::new(KeyCode::Char('C'), KeyModifiers::CONTROL | KeyModifiers::SHIFT);
+        assert_eq!(key_to_bytes(&key), vec![3]);
+        // Ctrl+2 -> NUL
+        assert_eq!(key_to_bytes(&ctrl(KeyCode::Char('2'))), vec![0x00]);
+        // Ctrl+'?' -> DEL
+        assert_eq!(key_to_bytes(&ctrl(KeyCode::Char('?'))), vec![0x7f]);
+    }
+
+    #[test]
+    fn test_key_to_bytes_alt_combination() {
+        // Alt+Enter already tested, but Alt+Char
+        assert_eq!(key_to_bytes(&alt(KeyCode::Char('a'))), vec![0x1b, b'a']);
+        // Alt with non-char should fall through to match (e.g., Alt+Enter)
+        // Non-char Alt handling is only for Char, other keys go to match arm
+        let alt_up = KeyEvent::new(KeyCode::Up, KeyModifiers::ALT);
+        assert_eq!(key_to_bytes(&alt_up), vec![0x1b, b'[', b'A']);
+    }
+
+    #[test]
+    fn test_worktree_helpers() {
+        assert!(worktree_name("hello world").starts_with("wt-hello_world-"));
+        assert!(worktree_name("  spaced  ").starts_with("wt-spaced-"));
+        assert!(worktree_name("a/b\\c").contains("a_b_c"));
+        assert_eq!(worktree_dir("/home/user/project", "wt-foo"), "/home/user/wt-foo");
+        // "project" has empty parent -> "/wt-foo" per current logic
+        assert_eq!(worktree_dir("project", "wt-foo"), "/wt-foo");
+        // "/" has no parent -> fallback to "."
+        assert_eq!(worktree_dir("/", "wt-foo"), "./wt-foo");
+        // Normal case
+        assert_eq!(worktree_dir("/tmp/myproj", "wt-test"), "/tmp/wt-test");
+    }
+
+    // Helper for capture writer
+    struct CaptureWriter {
+        buf: std::sync::Arc<parking_lot::Mutex<Vec<u8>>>,
+    }
+    impl std::io::Write for CaptureWriter {
+        fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+            self.buf.lock().extend_from_slice(data);
+            Ok(data.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn make_capture_process(id: usize, buf: std::sync::Arc<parking_lot::Mutex<Vec<u8>>>) -> Process {
+        Process {
+            id,
+            project_id: 1,
+            project_dir: "/tmp".into(),
+            name: format!("test{id}"),
+            child: None,
+            master: None,
+            master_writer: Some(Box::new(CaptureWriter { buf })),
+            parser: std::sync::Arc::new(parking_lot::Mutex::new(vt100::Parser::new(24, 80, 0))),
+            alive: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            status: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0)),
+            active_ms: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            cycle_start: std::sync::Arc::new(parking_lot::Mutex::new(None)),
+            status_socket_path: None,
+            shutdown_flag: None,
+            listener_thread: None,
+            kill_on_drop: false,
+            name_shared: None,
+            prev_screen: std::sync::Arc::new(parking_lot::Mutex::new(None)),
+        }
+    }
+
+    #[test]
+    fn test_paste_tty_writes_to_writer() {
+        let buf = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let proc = make_capture_process(42, buf.clone());
+        let mut processes = vec![proc];
+        let mut mode = crate::Mode::Tty { process_id: 42 };
+        let mut projects = vec![];
+        let mut next_pid = 2usize;
+        let mut next_id = 100usize;
+        let pty_system = portable_pty::NativePtySystem::default();
+        let mut rows = 24u16;
+        let mut cols = 80u16;
+        let entries = vec![];
+        let event = Event::Paste("hello world".into());
+        let res = process_event(
+            &mut mode,
+            &mut projects,
+            &mut next_pid,
+            &mut processes,
+            &mut next_id,
+            &pty_system,
+            event,
+            &mut rows,
+            &mut cols,
+            &entries,
+            true,
+            false,
+            false,
+        )
+        .unwrap();
+        assert!(!res);
+        assert_eq!(*buf.lock(), b"hello world");
+    }
+
+    #[test]
+    fn test_paste_temptty_writes() {
+        let buf = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let proc = make_capture_process(0, buf.clone());
+        let mut mode = crate::Mode::TempTty {
+            process: proc,
+            previous_selected: 0,
+        };
+        let mut processes = vec![];
+        let mut projects = vec![];
+        let mut next_pid = 2usize;
+        let mut next_id = 100usize;
+        let pty_system = portable_pty::NativePtySystem::default();
+        let mut rows = 24u16;
+        let mut cols = 80u16;
+        let entries = vec![];
+        let event = Event::Paste("pasted\ntext".into());
+        process_event(
+            &mut mode,
+            &mut projects,
+            &mut next_pid,
+            &mut processes,
+            &mut next_id,
+            &pty_system,
+            event,
+            &mut rows,
+            &mut cols,
+            &entries,
+            true,
+            false,
+            false,
+        )
+        .unwrap();
+        if let crate::Mode::TempTty { process, .. } = mode {
+            // Check via the process inside mode
+            // The buffer should contain the pasted text verbatim for TempTty
+            assert_eq!(*buf.lock(), b"pasted\ntext");
+            // Also ensure process still has writer
+            assert!(process.master_writer.is_some());
+        } else {
+            panic!("mode should still be TempTty");
+        }
+    }
+
+    #[test]
+    fn test_paste_prompt_filters_and_appends() {
+        let mut mode = crate::Mode::Prompt {
+            purpose: crate::PromptPurpose::NewProject,
+            selected: 0,
+            input: "hello".into(),
+        };
+        let mut processes = vec![];
+        let mut projects = vec![];
+        let mut next_pid = 2usize;
+        let mut next_id = 1usize;
+        let pty_system = portable_pty::NativePtySystem::default();
+        let mut rows = 24u16;
+        let mut cols = 80u16;
+        let entries = vec![];
+        // Paste with newlines should be filtered
+        let event = Event::Paste(" world\r\nwith\nnewlines".into());
+        process_event(
+            &mut mode,
+            &mut projects,
+            &mut next_pid,
+            &mut processes,
+            &mut next_id,
+            &pty_system,
+            event,
+            &mut rows,
+            &mut cols,
+            &entries,
+            true,
+            false,
+            false,
+        )
+        .unwrap();
+        if let crate::Mode::Prompt { input, .. } = mode {
+            assert_eq!(input, "hello worldwithnewlines");
+        } else {
+            panic!("expected Prompt");
+        }
+    }
+
+    #[test]
+    fn test_paste_normal_ignored() {
+        let mut mode = crate::Mode::Normal { selected: 0 };
+        let mut processes = vec![];
+        let mut projects = vec![crate::project::Project { id: 1, name: "proj".into(), directory: "/tmp".into() }];
+        let mut next_pid = 2usize;
+        let mut next_id = 1usize;
+        let pty_system = portable_pty::NativePtySystem::default();
+        let mut rows = 24u16;
+        let mut cols = 80u16;
+        let entries = crate::project::build_entries(&projects, &processes);
+        let event = Event::Paste("should be ignored".into());
+        let res = process_event(
+            &mut mode,
+            &mut projects,
+            &mut next_pid,
+            &mut processes,
+            &mut next_id,
+            &pty_system,
+            event,
+            &mut rows,
+            &mut cols,
+            &entries,
+            true,
+            false,
+            false,
+        )
+        .unwrap();
+        assert!(!res);
+        assert!(matches!(mode, crate::Mode::Normal { .. }));
+    }
+
+    #[test]
+    fn test_paste_dirpicker_search_append() {
+        let theme = Theme::default().add_default_title();
+        let mut explorer = FileExplorerBuilder::build_with_theme(theme).unwrap();
+        let _ = explorer.set_only_dirs(true);
+        // Activate search with "foo"
+        let _ = explorer.set_search_query(Some("foo".into()));
+        let mut mode = crate::Mode::DirPicker {
+            explorer: Box::new(explorer),
+            previous_selected: 0,
+        };
+        let mut processes = vec![];
+        let mut projects = vec![];
+        let mut next_pid = 2usize;
+        let mut next_id = 1usize;
+        let pty_system = portable_pty::NativePtySystem::default();
+        let mut rows = 24u16;
+        let mut cols = 80u16;
+        let entries = vec![];
+        // Paste "bar\r\nbaz" -> filtered to "barbaz", so "foo" + "barbaz" = "foobar baz" without space -> "foobar baz" is "foobar baz" with space, but expected is "foobar baz" without space i.e. "foobar baz" -> actually "foobar baz"
+        // Use simple case: "bar" -> "foobar"
+        let event = Event::Paste("bar\r\nbaz".into());
+        process_event(
+            &mut mode,
+            &mut projects,
+            &mut next_pid,
+            &mut processes,
+            &mut next_id,
+            &pty_system,
+            event,
+            &mut rows,
+            &mut cols,
+            &entries,
+            true,
+            false,
+            false,
+        )
+        .unwrap();
+        if let crate::Mode::DirPicker { explorer, .. } = mode {
+            let expected = format!("{}{}", "foo", "barbaz");
+            assert_eq!(explorer.search_query().unwrap(), &expected);
+        } else {
+            panic!("expected DirPicker");
+        }
+    }
+
+    #[test]
+    fn test_process_event_resize_clears_prev_screen_and_updates_sizes() {
+        let proc = make_capture_process(1, std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())));
+        // Simulate some screen content and cache
+        {
+            let mut parser = proc.parser.lock();
+            parser.process(b"hello");
+            let screen = parser.screen().clone();
+            *proc.prev_screen.lock() = Some(screen);
+        }
+        assert!(proc.prev_screen.lock().is_some());
+        let mut processes = vec![proc];
+        let mut mode = crate::Mode::Normal { selected: 0 };
+        let mut projects = vec![];
+        let mut next_pid = 2usize;
+        let mut next_id = 1usize;
+        let pty_system = portable_pty::NativePtySystem::default();
+        let mut rows = 24u16;
+        let mut cols = 80u16;
+        let entries = vec![];
+        let event = Event::Resize(100, 40);
+        process_event(
+            &mut mode,
+            &mut projects,
+            &mut next_pid,
+            &mut processes,
+            &mut next_id,
+            &pty_system,
+            event,
+            &mut rows,
+            &mut cols,
+            &entries,
+            true,
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(rows, 40);
+        assert_eq!(cols, 100);
+        // prev_screen should be cleared
+        assert!(processes[0].prev_screen.lock().is_none());
+        // parser size should be updated
+        let parser = processes[0].parser.lock();
+        assert_eq!(parser.screen().size(), (40, 100));
+    }
+
+    #[test]
+    fn test_process_event_resize_temptty() {
+        let buf = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let proc = make_capture_process(0, buf);
+        {
+            let mut parser = proc.parser.lock();
+            parser.process(b"test");
+            let screen = parser.screen().clone();
+            *proc.prev_screen.lock() = Some(screen);
+        }
+        let mut mode = crate::Mode::TempTty { process: proc, previous_selected: 5 };
+        let mut processes = vec![];
+        let mut projects = vec![];
+        let mut next_pid = 2usize;
+        let mut next_id = 1usize;
+        let pty_system = portable_pty::NativePtySystem::default();
+        let mut rows = 24u16;
+        let mut cols = 80u16;
+        let entries = vec![];
+        let event = Event::Resize(90, 30);
+        process_event(
+            &mut mode,
+            &mut projects,
+            &mut next_pid,
+            &mut processes,
+            &mut next_id,
+            &pty_system,
+            event,
+            &mut rows,
+            &mut cols,
+            &entries,
+            true,
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(rows, 30);
+        assert_eq!(cols, 90);
+        if let crate::Mode::TempTty { process, .. } = mode {
+            assert!(process.prev_screen.lock().is_none());
+            assert_eq!(process.parser.lock().screen().size(), (30, 90));
+        } else {
+            panic!("expected TempTty");
+        }
+    }
+
+    #[test]
+    fn test_tty_esc_returns_to_normal() {
+        let buf = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let proc = make_capture_process(5, buf);
+        let mut processes = vec![proc];
+        let mut mode = crate::Mode::Tty { process_id: 5 };
+        let mut projects = vec![crate::project::Project { id: 1, name: "p".into(), directory: "/tmp".into() }];
+        let entries = crate::project::build_entries(&projects, &processes);
+        let mut next_pid = 2usize;
+        let mut next_id = 10usize;
+        let pty_system = portable_pty::NativePtySystem::default();
+        let mut rows = 24u16;
+        let mut cols = 80u16;
+        let key = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        let event = Event::Key(key);
+        process_event(
+            &mut mode,
+            &mut projects,
+            &mut next_pid,
+            &mut processes,
+            &mut next_id,
+            &pty_system,
+            event,
+            &mut rows,
+            &mut cols,
+            &entries,
+            true,
+            false,
+            false,
+        )
+        .unwrap();
+        assert!(matches!(mode, crate::Mode::Normal { .. }));
+    }
+
+    #[test]
+    fn test_tty_key_forwarding_writes_bytes() {
+        let buf = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let proc = make_capture_process(7, buf.clone());
+        let mut processes = vec![proc];
+        let mut mode = crate::Mode::Tty { process_id: 7 };
+        let mut projects = vec![];
+        let mut next_pid = 2usize;
+        let mut next_id = 1usize;
+        let pty_system = portable_pty::NativePtySystem::default();
+        let mut rows = 24u16;
+        let mut cols = 80u16;
+        let entries = vec![];
+        // Send 'a'
+        let key = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
+        process_event(
+            &mut mode,
+            &mut projects,
+            &mut next_pid,
+            &mut processes,
+            &mut next_id,
+            &pty_system,
+            Event::Key(key),
+            &mut rows,
+            &mut cols,
+            &entries,
+            true,
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(*buf.lock(), b"a");
+        // Send Shift+Enter
+        buf.lock().clear();
+        let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT);
+        process_event(
+            &mut mode,
+            &mut projects,
+            &mut next_pid,
+            &mut processes,
+            &mut next_id,
+            &pty_system,
+            Event::Key(key),
+            &mut rows,
+            &mut cols,
+            &entries,
+            true,
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(*buf.lock(), vec![0x1b, b'[', b'1', b'3', b';', b'2', b'u']);
+    }
+
+    #[test]
+    fn test_temptty_esc_returns() {
+        let proc = make_capture_process(0, std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())));
+        let mut mode = crate::Mode::TempTty { process: proc, previous_selected: 3 };
+        let mut processes = vec![];
+        let mut projects = vec![];
+        let mut next_pid = 2usize;
+        let mut next_id = 1usize;
+        let pty_system = portable_pty::NativePtySystem::default();
+        let mut rows = 24u16;
+        let mut cols = 80u16;
+        let entries = vec![];
+        let key = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        process_event(
+            &mut mode,
+            &mut projects,
+            &mut next_pid,
+            &mut processes,
+            &mut next_id,
+            &pty_system,
+            Event::Key(key),
+            &mut rows,
+            &mut cols,
+            &entries,
+            true,
+            false,
+            false,
+        )
+        .unwrap();
+        assert!(matches!(mode, crate::Mode::Normal { selected: 3 }));
+    }
+
+    #[test]
+    fn test_paste_tty_no_writer_does_not_panic() {
+        let mut proc = make_capture_process(1, std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())));
+        proc.master_writer = None;
+        let mut processes = vec![proc];
+        let mut mode = crate::Mode::Tty { process_id: 1 };
+        let mut projects = vec![];
+        let mut next_pid = 2usize;
+        let mut next_id = 1usize;
+        let pty_system = portable_pty::NativePtySystem::default();
+        let mut rows = 24u16;
+        let mut cols = 80u16;
+        let entries = vec![];
+        let event = Event::Paste("test".into());
+        let res = process_event(
+            &mut mode,
+            &mut projects,
+            &mut next_pid,
+            &mut processes,
+            &mut next_id,
+            &pty_system,
+            event,
+            &mut rows,
+            &mut cols,
+            &entries,
+            true,
+            false,
+            false,
+        );
+        assert!(res.is_ok());
+    }
+
+    #[test]
+    fn test_paste_tty_wrong_pid_ignored() {
+        let buf = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let proc = make_capture_process(10, buf.clone());
+        let mut processes = vec![proc];
+        let mut mode = crate::Mode::Tty { process_id: 999 };
+        let mut projects = vec![];
+        let mut next_pid = 2usize;
+        let mut next_id = 1usize;
+        let pty_system = portable_pty::NativePtySystem::default();
+        let mut rows = 24u16;
+        let mut cols = 80u16;
+        let entries = vec![];
+        let event = Event::Paste("ignored".into());
+        process_event(
+            &mut mode,
+            &mut projects,
+            &mut next_pid,
+            &mut processes,
+            &mut next_id,
+            &pty_system,
+            event,
+            &mut rows,
+            &mut cols,
+            &entries,
+            true,
+            false,
+            false,
+        )
+        .unwrap();
+        assert!(buf.lock().is_empty());
+    }
+
+    #[test]
+    fn test_paste_dirpicker_no_search_ignored() {
+        let theme = Theme::default().add_default_title();
+        let mut explorer = FileExplorerBuilder::build_with_theme(theme).unwrap();
+        let _ = explorer.set_only_dirs(true);
+        // No search query set
+        assert!(explorer.search_query().is_none());
+        let mut mode = crate::Mode::DirPicker {
+            explorer: Box::new(explorer),
+            previous_selected: 0,
+        };
+        let mut processes = vec![];
+        let mut projects = vec![];
+        let mut next_pid = 2usize;
+        let mut next_id = 1usize;
+        let pty_system = portable_pty::NativePtySystem::default();
+        let mut rows = 24u16;
+        let mut cols = 80u16;
+        let entries = vec![];
+        let event = Event::Paste("should be ignored".into());
+        process_event(
+            &mut mode,
+            &mut projects,
+            &mut next_pid,
+            &mut processes,
+            &mut next_id,
+            &pty_system,
+            event,
+            &mut rows,
+            &mut cols,
+            &entries,
+            true,
+            false,
+            false,
+        )
+        .unwrap();
+        if let crate::Mode::DirPicker { explorer, .. } = mode {
+            assert!(explorer.search_query().is_none());
+        } else {
+            panic!("expected DirPicker");
+        }
+    }
+
+    #[test]
+    fn test_process_event_resize_no_processes() {
+        let mut mode = crate::Mode::Normal { selected: 0 };
+        let mut processes = vec![];
+        let mut projects = vec![];
+        let mut next_pid = 2usize;
+        let mut next_id = 1usize;
+        let pty_system = portable_pty::NativePtySystem::default();
+        let mut rows = 24u16;
+        let mut cols = 80u16;
+        let entries = vec![];
+        let event = Event::Resize(80, 24);
+        let res = process_event(
+            &mut mode,
+            &mut projects,
+            &mut next_pid,
+            &mut processes,
+            &mut next_id,
+            &pty_system,
+            event,
+            &mut rows,
+            &mut cols,
+            &entries,
+            true,
+            false,
+            false,
+        );
+        assert!(res.is_ok());
+        assert_eq!(rows, 24);
+        assert_eq!(cols, 80);
+    }
+
+    #[test]
+    fn test_key_to_bytes_unknown_returns_empty() {
+        // KeyCode::CapsLock and others should return empty
+        assert_eq!(key_to_bytes(&kc(KeyCode::CapsLock)), Vec::<u8>::new());
+        assert_eq!(key_to_bytes(&kc(KeyCode::Null)), Vec::<u8>::new());
+        // Ctrl+Shift with unknown char
+        let key = KeyEvent::new(KeyCode::Char('!'), KeyModifiers::CONTROL);
+        assert_eq!(key_to_bytes(&key), Vec::<u8>::new());
+    }
 }

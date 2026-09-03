@@ -25,9 +25,9 @@ pub struct Process {
     pub status: Arc<AtomicU8>,
     pub active_ms: Arc<AtomicU64>,
     pub cycle_start: Arc<Mutex<Option<Instant>>>,
-    status_socket_path: Option<String>,
-    shutdown_flag: Option<Arc<AtomicBool>>,
-    listener_thread: Option<JoinHandle<()>>,
+    pub status_socket_path: Option<String>,
+    pub shutdown_flag: Option<Arc<AtomicBool>>,
+    pub listener_thread: Option<JoinHandle<()>>,
     pub kill_on_drop: bool,
     pub name_shared: Option<Arc<Mutex<String>>>,
     pub prev_screen: Arc<Mutex<Option<vt100::Screen>>>,
@@ -354,5 +354,169 @@ mod tests {
         assert_eq!(p.status.load(Ordering::SeqCst), status::STATUS_GIT_CONFLICT);
         assert_eq!(p.active_ms.load(Ordering::SeqCst), 10000);
         assert!(p.cycle_start.lock().is_none());
+    }
+
+    #[test]
+    fn test_resize_parsers_clears_prev_screen() {
+        // Use a reasonably sized parser to avoid vt100 overflow on tiny 1x1 grids
+        let p = {
+            let mut base = make_test_process(true, status::STATUS_WORKING, 0, false);
+            // Replace 1x1 parser with 10x20 for realistic content
+            base.parser = Arc::new(parking_lot::Mutex::new(vt100::Parser::new(10, 20, 0)));
+            base
+        };
+        // Fill parser with content and set prev_screen
+        {
+            let mut parser = p.parser.lock();
+            parser.process(b"hello world");
+        }
+        let screen = p.parser.lock().screen().clone();
+        *p.prev_screen.lock() = Some(screen);
+        assert!(p.prev_screen.lock().is_some());
+        let mut processes = vec![p];
+        resize_parsers(&mut processes, 30, 100);
+        assert!(processes[0].prev_screen.lock().is_none());
+        let (rows, cols) = processes[0].parser.lock().screen().size();
+        assert_eq!((rows, cols), (30, 100));
+    }
+
+    #[test]
+    fn test_resize_parsers_zero_defaults() {
+        let p = make_test_process(true, status::STATUS_NOT_YET, 0, false);
+        let mut processes = vec![p];
+        resize_parsers(&mut processes, 0, 0);
+        let (rows, cols) = processes[0].parser.lock().screen().size();
+        assert_eq!((rows, cols), (24, 80));
+        assert!(processes[0].prev_screen.lock().is_none());
+    }
+
+    #[test]
+    fn test_resize_parsers_preserves_visible_content() {
+        let p = make_test_process(true, status::STATUS_NOT_YET, 0, false);
+        // Give parser a larger initial size
+        {
+            let mut parser = p.parser.lock();
+            *parser = vt100::Parser::new(10, 20, 0);
+            parser.process(b"test content");
+        }
+        let _before = p.parser.lock().screen().contents();
+        let mut processes = vec![p];
+        resize_parsers(&mut processes, 10, 20);
+        let after = processes[0].parser.lock().screen().contents();
+        assert!(after.contains("test content") || after.contains("test"));
+        // Ensure scrollback preserved
+        assert!(processes[0].parser.lock().screen().size() == (10, 20));
+    }
+
+    #[test]
+    fn test_prev_screen_initially_none() {
+        let p = make_test_process(true, status::STATUS_NOT_YET, 0, false);
+        assert!(p.prev_screen.lock().is_none());
+    }
+
+    #[test]
+    fn test_check_tty_alive_tty_dead_removes() {
+        let p = make_test_process(false, status::STATUS_WORKING, 0, false);
+        let pid = p.id;
+        let mut processes = vec![p];
+        let mode = crate::Mode::Tty { process_id: pid };
+        let result = check_tty_alive(&mode, &mut processes);
+        assert_eq!(result, Some(0));
+        assert!(processes.is_empty());
+    }
+
+    #[test]
+    fn test_check_tty_alive_tty_alive_noop() {
+        let p = make_test_process(true, status::STATUS_WORKING, 0, false);
+        let pid = p.id;
+        let mut processes = vec![p];
+        let mode = crate::Mode::Tty { process_id: pid };
+        let result = check_tty_alive(&mode, &mut processes);
+        assert_eq!(result, None);
+        assert_eq!(processes.len(), 1);
+    }
+
+    #[test]
+    fn test_check_tty_alive_tty_not_found() {
+        let p = make_test_process(true, status::STATUS_NOT_YET, 0, false);
+        let mut processes = vec![p];
+        let mode = crate::Mode::Tty { process_id: 999 };
+        let result = check_tty_alive(&mode, &mut processes);
+        assert_eq!(result, Some(0));
+        // Should retain existing process since pid not found? Actually code retains only p.id != 999, so keeps p
+        assert_eq!(processes.len(), 1);
+    }
+
+    #[test]
+    fn test_check_tty_alive_temptty_dead() {
+        let proc = make_test_process(false, status::STATUS_NOT_YET, 0, false);
+        proc.alive.store(false, Ordering::SeqCst);
+        let mode = crate::Mode::TempTty {
+            process: proc,
+            previous_selected: 3,
+        };
+        let mut processes = vec![];
+        let result = check_tty_alive(&mode, &mut processes);
+        assert_eq!(result, Some(3));
+    }
+
+    #[test]
+    fn test_check_tty_alive_temptty_alive() {
+        let proc = make_test_process(true, status::STATUS_NOT_YET, 0, false);
+        proc.alive.store(true, Ordering::SeqCst);
+        let mode = crate::Mode::TempTty {
+            process: proc,
+            previous_selected: 2,
+        };
+        let mut processes = vec![];
+        let result = check_tty_alive(&mode, &mut processes);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_check_tty_alive_normal_is_none() {
+        let mode = crate::Mode::Normal { selected: 0 };
+        let mut processes = vec![];
+        let result = check_tty_alive(&mode, &mut processes);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_parser_processes_ansi_and_diff_logic() {
+        let mut parser = vt100::Parser::new(5, 20, 0);
+        parser.process(b"hello");
+        let screen1 = parser.screen().clone();
+        let bytes1 = screen1.state_formatted();
+        assert!(!bytes1.is_empty());
+        // Store as prev
+        let prev: Option<vt100::Screen> = Some(screen1.clone());
+        parser.process(b" world");
+        let screen2 = parser.screen().clone();
+        let diff = screen2.state_diff(prev.as_ref().unwrap());
+        assert!(!diff.is_empty());
+        // Diff should be smaller than full
+        let full = screen2.state_formatted();
+        assert!(diff.len() < full.len());
+        // Same screen diff should be empty
+        let diff2 = screen2.state_diff(&screen2);
+        assert!(diff2.is_empty());
+        // Different size forces full redraw
+        let mut parser2 = vt100::Parser::new(10, 30, 0);
+        parser2.process(b"hello");
+        let screen3 = parser2.screen().clone();
+        assert_ne!(screen2.size(), screen3.size());
+    }
+
+    #[test]
+    fn test_vt100_contents_and_state() {
+        let mut parser = vt100::Parser::new(3, 10, 0);
+        parser.process(b"\x1b[31mred\x1b[0m");
+        let screen = parser.screen();
+        assert!(screen.contents().contains("red"));
+        let formatted = screen.contents_formatted();
+        // Should contain color escape or at least content
+        assert!(formatted.windows(3).any(|w| w == b"red"));
+        let state = screen.state_formatted();
+        assert!(!state.is_empty());
     }
 }

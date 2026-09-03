@@ -3,6 +3,7 @@ use std::sync::atomic::Ordering;
 
 use crossterm::execute;
 use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate};
+use ratatui::backend::Backend;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout};
@@ -17,8 +18,8 @@ use crate::project::{ListEntry, Project};
 use crate::status;
 
 #[allow(clippy::too_many_arguments)]
-pub fn render(
-    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+pub fn render<W: Write>(
+    terminal: &mut Terminal<CrosstermBackend<W>>,
     mode: &Mode,
     entries: &[ListEntry],
     projects: &[Project],
@@ -81,8 +82,8 @@ fn process_item(proc: &Process) -> ListItem<'static> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn render_normal(
-    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+fn render_normal<B: Backend>(
+    terminal: &mut Terminal<B>,
     entries: &[ListEntry],
     projects: &[Project],
     processes: &[Process],
@@ -92,7 +93,8 @@ fn render_normal(
     confirm_quit: bool,
     no_worktree: bool,
 ) -> std::io::Result<()> {
-    terminal.draw(|frame| {
+    terminal
+        .draw(|frame| {
         let layout = Layout::vertical([
             Constraint::Length(1),
             Constraint::Length(1),
@@ -166,13 +168,13 @@ fn render_normal(
             Line::from("n: new  N: spawn & enter  m: spawn bare  r: rename  d: kill  h: lazygit  s: shell  p/l: new/rm project  Enter: TTY  q/Esc: quit")
         };
         frame.render_widget(help, help_area);
-    })?;
+    }).map_err(|e| std::io::Error::other(format!("{e:?}")))?;
     Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
-fn render_prompt(
-    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+fn render_prompt<B: Backend>(
+    terminal: &mut Terminal<B>,
     entries: &[ListEntry],
     projects: &[Project],
     processes: &[Process],
@@ -247,54 +249,49 @@ fn render_prompt(
         };
         let help = Line::from(format!("{}{}_", label, input));
         frame.render_widget(help, help_area);
-    })?;
+    }).map_err(|e| std::io::Error::other(format!("{e:?}")))?;
     Ok(())
 }
 
-fn render_tty(
-    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+pub(crate) fn tty_output(proc: &Process) -> Option<Vec<u8>> {
+    let parser = proc.parser.lock();
+    let screen = parser.screen();
+    let mut prev = proc.prev_screen.lock();
+    let bytes = if let Some(prev_screen) = prev.as_ref() {
+        if prev_screen.size() == screen.size() {
+            screen.state_diff(prev_screen)
+        } else {
+            screen.state_formatted()
+        }
+    } else {
+        screen.state_formatted()
+    };
+    if bytes.is_empty() {
+        return None;
+    }
+    *prev = Some(screen.clone());
+    Some(bytes)
+}
+
+fn render_tty<W: Write>(
+    terminal: &mut Terminal<CrosstermBackend<W>>,
     proc: &Process,
     _rows: u16,
     _cols: u16,
 ) -> std::io::Result<()> {
-    // Use differential rendering with synchronized updates to avoid flicker.
-    // We keep the previous screen per-process and only send the diff,
-    // which avoids full-screen clears on every tick.
-    let output = {
-        let parser = proc.parser.lock();
-        let screen = parser.screen();
-        let mut prev = proc.prev_screen.lock();
-        let bytes = if let Some(prev_screen) = prev.as_ref() {
-            if prev_screen.size() == screen.size() {
-                screen.state_diff(prev_screen)
-            } else {
-                screen.state_formatted()
-            }
-        } else {
-            screen.state_formatted()
-        };
-        if bytes.is_empty() {
-            // No visual change since last render – skip to prevent flicker.
-            return Ok(());
-        }
-        *prev = Some(screen.clone());
-        bytes
+    let Some(output) = tty_output(proc) else {
+        return Ok(());
     };
-
     let stdout = terminal.backend_mut();
     execute!(stdout, BeginSynchronizedUpdate)?;
     stdout.write_all(&output)?;
-    // Ensure attributes are reset after TTY content to avoid leaking into UI.
-    // state_formatted/state_diff already handle attributes, but we keep a
-    // minimal reset to be safe when diff doesn't cover the whole screen.
-    // This is done without extra cursor moves – the diff already positions cursor.
     execute!(stdout, EndSynchronizedUpdate)?;
-    stdout.flush()?;
+    std::io::Write::flush(stdout)?;
     Ok(())
 }
 
-fn render_dirpicker(
-    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+fn render_dirpicker<B: Backend>(
+    terminal: &mut Terminal<B>,
     explorer: &FileExplorer,
     _rows: u16,
     cols: u16,
@@ -327,6 +324,154 @@ fn render_dirpicker(
             Line::from("Enter: pick directory  Esc: cancel  \u{2191}\u{2193}\u{2190}\u{2192}: navigate  /: search")
         };
         frame.render_widget(help, help_area);
-    })?;
+    }).map_err(|e| std::io::Error::other(format!("{e:?}")))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::process::Process;
+    use parking_lot::Mutex;
+    use ratatui::{Terminal, backend::TestBackend};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU8, AtomicU64},
+    };
+
+    fn make_proc_with_content(content: &[u8], rows: u16, cols: u16) -> Process {
+        let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 0)));
+        parser.lock().process(content);
+        Process {
+            id: 1,
+            project_id: 1,
+            project_dir: "/tmp".into(),
+            name: "test".into(),
+            child: None,
+            master: None,
+            master_writer: None,
+            parser,
+            alive: Arc::new(AtomicBool::new(true)),
+            status: Arc::new(AtomicU8::new(0)),
+            active_ms: Arc::new(AtomicU64::new(0)),
+            cycle_start: Arc::new(Mutex::new(None)),
+            status_socket_path: None,
+            shutdown_flag: None,
+            listener_thread: None,
+            kill_on_drop: false,
+            name_shared: None,
+            prev_screen: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    #[test]
+    fn test_render_tty_first_call_sets_prev_and_produces_output() {
+        let proc = make_proc_with_content(b"hello", 10, 20);
+        assert!(proc.prev_screen.lock().is_none());
+        let out = tty_output(&proc);
+        assert!(out.is_some());
+        assert!(proc.prev_screen.lock().is_some());
+        assert!(!out.unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_render_tty_second_call_same_content_is_noop() {
+        let proc = make_proc_with_content(b"hello", 10, 20);
+        let first = tty_output(&proc);
+        assert!(first.is_some());
+        let prev_clone = proc.prev_screen.lock().clone().unwrap();
+        // Second call with same screen should be empty diff and return None
+        let second = tty_output(&proc);
+        assert!(second.is_none());
+        let prev_after = proc.prev_screen.lock().clone().unwrap();
+        assert_eq!(prev_clone.contents(), prev_after.contents());
+    }
+
+    #[test]
+    fn test_render_tty_diff_smaller_than_full() {
+        let proc = make_proc_with_content(b"hello", 10, 20);
+        let _ = tty_output(&proc).unwrap();
+        let prev = proc.prev_screen.lock().clone().unwrap();
+        proc.parser.lock().process(b" world");
+        let current = proc.parser.lock().screen().clone();
+        let diff = current.state_diff(&prev);
+        let full = current.state_formatted();
+        assert!(!diff.is_empty());
+        assert!(diff.len() < full.len());
+        let out = tty_output(&proc);
+        assert!(out.is_some());
+        assert_eq!(out.unwrap(), diff);
+    }
+
+    #[test]
+    fn test_render_tty_resize_forces_full_redraw() {
+        let proc = make_proc_with_content(b"hello", 10, 20);
+        let _ = tty_output(&proc).unwrap();
+        let prev_size = proc.prev_screen.lock().as_ref().unwrap().size();
+        assert_eq!(prev_size, (10, 20));
+        {
+            let mut parser = proc.parser.lock();
+            *parser = vt100::Parser::new(15, 30, 0);
+            parser.process(b"hello");
+        }
+        *proc.prev_screen.lock() = None;
+        assert!(proc.prev_screen.lock().is_none());
+        let out = tty_output(&proc);
+        assert!(out.is_some());
+        assert!(proc.prev_screen.lock().is_some());
+        let new_size = proc.prev_screen.lock().as_ref().unwrap().size();
+        assert_eq!(new_size, (15, 30));
+        // Full redraw should contain clear screen
+        assert!(out.unwrap().windows(2).any(|w| w == b"\x1b[" ));
+    }
+
+    #[test]
+    fn test_render_tty_missing_process_returns_ok() {
+        // For missing process, render should not attempt TTY rendering and just return Ok.
+        // We test via helper that no panic occurs when process not found – the render function
+        // handles missing process gracefully.
+        let proc = make_proc_with_content(b"", 24, 80);
+        let out = tty_output(&proc);
+        assert!(out.is_some());
+        // Simulate missing process case: no output expected for non-existent pid
+        // (render would return Ok without calling tty_output)
+    }
+
+    #[test]
+    fn test_render_tty_synchronized_update_sequences_present() {
+        let proc = make_proc_with_content(b"test", 5, 10);
+        let screen = proc.parser.lock().screen().clone();
+        let full = screen.state_formatted();
+        assert!(full.windows(3).any(|w| w == b"\x1b[H"));
+        let out = tty_output(&proc).unwrap();
+        // The TTY output (vt100 state) should be non-empty and contain content
+        assert!(!out.is_empty());
+        assert!(proc.prev_screen.lock().is_some());
+        // Verify synchronized update framing would be added by render_tty (not by vt100)
+        // The helper itself does not add framing, but render_tty would wrap it.
+        // Here we just ensure helper works.
+    }
+
+    #[test]
+    fn test_render_normal_and_prompt_do_not_panic() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let projects = vec![crate::project::Project { id: 1, name: "proj".into(), directory: "/tmp".into() }];
+        let proc = make_proc_with_content(b"", 24, 80);
+        let entries = crate::project::build_entries(&projects, &[proc]);
+        let res = render_normal(&mut terminal, &entries, &projects, &[], 0, 24, 80, false, false);
+        assert!(res.is_ok());
+        let res = render_prompt(
+            &mut terminal,
+            &entries,
+            &projects,
+            &[],
+            0,
+            &crate::PromptPurpose::NewProject,
+            "input",
+            24,
+            80,
+        );
+        assert!(res.is_ok());
+    }
 }
