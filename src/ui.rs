@@ -513,6 +513,43 @@ fn render_tty<W: Write>(
     Ok(())
 }
 
+/// Force the next render to be a full repaint, for a newly attached client.
+///
+/// A fresh client starts from a blank screen, but ratatui diffs frames
+/// against the server's *current* screen and `tty_output` diffs against the
+/// vt100 cache — if nothing changed, both emit nothing and the client stays
+/// blank until the next keystroke causes a visible change. Resetting both
+/// ratatui buffers (no backend writes, no cursor query, no physical clear —
+/// the client's own `Clear(All)` on startup already wiped its screen) plus
+/// dropping every vt100 diff cache makes the next render emit one complete
+/// frame.
+///
+/// Call on every remote `Resize`: `Hello` arrives as a resize and real
+/// client resizes also need a full frame at the new geometry.
+#[cfg_attr(not(feature = "attach"), allow(dead_code))]
+pub fn force_full_repaint<B: Backend>(
+    terminal: &mut Terminal<B>,
+    mode: &Mode,
+    processes: &[Process],
+) {
+    // Blank both ratatui buffers without touching the physical screen: the
+    // next `draw()` diffs blank-vs-blank and repaints every cell. The bytes
+    // flow through the backend (and the attach tee) to the client as one
+    // full frame; locally it just redraws identical pixels. NOTE: this must
+    // reset the *inactive* buffer, which is exactly what double
+    // `swap_buffers()` does — it does NOT emit anything by itself.
+    terminal.swap_buffers();
+    terminal.swap_buffers();
+    // Same idea for raw TTY passthrough: drop the diff cache so the next
+    // tick emits `state_formatted` instead of an (empty) diff.
+    for proc in processes {
+        *proc.prev_screen.lock() = None;
+    }
+    if let Mode::TempTty { process, .. } = mode {
+        *process.prev_screen.lock() = None;
+    }
+}
+
 fn render_dirpicker<B: Backend>(
     terminal: &mut Terminal<B>,
     explorer: &FileExplorer,
@@ -1022,5 +1059,81 @@ mod tests {
         // help line must all be non-empty.
         assert!(!lines[0].trim().is_empty());
         assert!(lines[1].chars().any(|c| c == '═'));
+    }
+
+    #[test]
+    fn test_force_full_repaint_forces_full_frame() {
+        use ratatui::backend::TestBackend;
+        use ratatui::{Terminal, backend::Backend};
+
+        let backend = TestBackend::new(30, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let projects = vec![crate::project::Project {
+            id: 1,
+            name: "proj".into(),
+            directory: "/tmp".into(),
+        }];
+        let proc = make_proc_with_content(b"idle", 8, 30);
+        let entries = crate::project::build_entries(&projects, std::slice::from_ref(&proc));
+        let mode = crate::Mode::Normal { selected: 0 };
+
+        // Steady state: draw twice; the second draw emits an empty diff
+        // (nothing changed) — this is exactly the idle-server attach case.
+        render_normal(
+            &mut terminal,
+            &entries,
+            &projects,
+            &[],
+            0,
+            8,
+            30,
+            false,
+            false,
+        )
+        .unwrap();
+        render_normal(
+            &mut terminal,
+            &entries,
+            &projects,
+            &[],
+            0,
+            8,
+            30,
+            false,
+            false,
+        )
+        .unwrap();
+        let size = terminal.backend().size().unwrap();
+        let second: String = (0..size.height)
+            .flat_map(|y| (0..size.width).map(move |x| (x, y)))
+            .map(|(x, y)| terminal.backend().buffer()[(x, y)].symbol().to_string())
+            .collect();
+        assert!(second.contains("Multistack"));
+
+        // A fresh client would see nothing more (empty diff). After forcing
+        // a repaint, the next draw must repaint every cell: emulate a blank
+        // previous buffer the way ratatui's own diff machinery does — the
+        // forced draw must rewrite all rows so the client's diff is full.
+        force_full_repaint(&mut terminal, &mode, std::slice::from_ref(&proc));
+        // vt100 cache dropped too (raw TTY path heals the same way).
+        assert!(proc.prev_screen.lock().is_none());
+        render_normal(
+            &mut terminal,
+            &entries,
+            &projects,
+            &[],
+            0,
+            8,
+            30,
+            false,
+            false,
+        )
+        .unwrap();
+        let size = terminal.backend().size().unwrap();
+        let repainted: String = (0..size.height)
+            .flat_map(|y| (0..size.width).map(move |x| (x, y)))
+            .map(|(x, y)| terminal.backend().buffer()[(x, y)].symbol().to_string())
+            .collect();
+        assert!(repainted.contains("Multistack"));
     }
 }

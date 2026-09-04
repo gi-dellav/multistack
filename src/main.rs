@@ -1,3 +1,7 @@
+#[cfg(feature = "attach")]
+mod attach;
+#[cfg(feature = "attach")]
+mod attach_proto;
 mod input;
 mod persistence;
 mod process;
@@ -31,6 +35,8 @@ use persistence::load_project_dirs;
 use process::{Process, check_tty_alive, sync_statuses};
 use project::{Project, build_entries};
 use status::STATUS_GIT_CONFLICT;
+#[cfg(feature = "attach")]
+use ui::force_full_repaint;
 use ui::{enter_tty_real, exit_temp_tty_real, exit_tty_real, render, wipe_real};
 
 #[derive(Parser)]
@@ -60,6 +66,19 @@ struct Cli {
         help = "Disable worktree integration (n spawns bare agent, N disabled)"
     )]
     no_worktree: bool,
+    /// Attach to another running multistack instance. With no value, attaches
+    /// to the oldest running instance; with a PID (`--attach 1234`), attaches
+    /// to that instance. Ctrl+\ detaches. Compile-time feature `attach`
+    /// (enabled by default); without it this flag does not exist.
+    #[cfg(feature = "attach")]
+    #[arg(
+        long = "attach",
+        num_args = 0..=1,
+        default_missing_value = "",
+        value_name = "PID",
+        help = "Attach to another running multistack instance (default: oldest)"
+    )]
+    attach: Option<String>,
 }
 
 pub enum PromptPurpose {
@@ -94,16 +113,61 @@ enum Mode {
 fn main() -> std::io::Result<()> {
     let cli = Cli::parse();
     let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_time()
+        .enable_all()
         .build()?;
     rt.block_on(run(cli))
 }
 
+#[cfg(feature = "attach")]
 async fn run(cli: Cli) -> std::io::Result<()> {
+    // Client mode: mirror another instance, never bind our own socket.
+    if let Some(target) = cli.attach.as_deref() {
+        return attach::run_attach(target).await;
+    }
+    run_server(cli).await
+}
+
+#[cfg(not(feature = "attach"))]
+async fn run(cli: Cli) -> std::io::Result<()> {
+    run_server(cli).await
+}
+
+async fn run_server(cli: Cli) -> std::io::Result<()> {
+    // Attach listener (server side). Bound before entering the alternate
+    // screen so a bind failure is visible on stderr. A bind failure is
+    // non-fatal: the session runs without attach.
+    #[cfg(feature = "attach")]
+    let mut attach_guard = match attach::AttachListener::bind() {
+        Ok(g) => Some(g),
+        Err(e) => {
+            eprintln!("multistack: attach disabled (cannot bind socket): {e}");
+            None
+        }
+    };
+    #[cfg(feature = "attach")]
+    let mut attach_tokio: Option<tokio::net::UnixListener> =
+        attach_guard.as_mut().and_then(|g| g.take_listener());
+    #[cfg(not(feature = "attach"))]
+    let mut attach_tokio: Option<()> = None;
+
+    // Remote input from an attached client. Its sender is cloned into each
+    // accepted pump; `recv()` yields the forwarded events. Always created
+    // (even without the feature) so the `select!` below is identical — in
+    // non-attach builds the sender is simply never used.
+    #[allow(unused_mut)]
+    let (remote_tx, mut remote_rx) = tokio::sync::mpsc::channel::<crossterm::event::Event>(128);
+    #[cfg(not(feature = "attach"))]
+    let _ = remote_tx.clone();
+
     let mut stdout = stdout();
     enable_raw_mode()?;
     execute!(stdout, terminal::EnterAlternateScreen, cursor::Hide)?;
 
+    #[cfg(feature = "attach")]
+    let tee = attach::TeeWriter::new(stdout);
+    #[cfg(feature = "attach")]
+    let mut terminal = Terminal::new(CrosstermBackend::new(tee.clone()))?;
+    #[cfg(not(feature = "attach"))]
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout))?;
 
     let supports_keyboard_enhancement = matches!(
@@ -238,169 +302,328 @@ async fn run(cli: Cli) -> std::io::Result<()> {
                 _ = render_interval.tick() => {
                 render(&mut terminal, &mode, &entries, &projects, &processes, term_rows, term_cols, confirm_quit, cli.no_worktree)?;
             }
+            accepted = accept_attach_conn(&mut attach_tokio) => {
+                #[cfg(feature = "attach")]
+                {
+                    if let Some(stream) = accepted {
+                        let conn = attach::AttachConn { stream };
+                        let tee2 = tee.clone();
+                        let tx2 = remote_tx.clone();
+                        // `current_thread` runtime: `spawn` runs the pump
+                        // cooperatively on this same thread. `pump_server_conn`
+                        // is fully async (tokio UnixStream), so it never blocks
+                        // the event loop.
+                        tokio::spawn(async move {
+                            attach::pump_server_conn(conn, tee2, tx2).await;
+                        });
+                    }
+                }
+                #[cfg(not(feature = "attach"))]
+                {
+                    drop(accepted);
+                }
+            }
+            // Forwarded input from the attached client: inject as if local.
+            // Falls through to the same dispatch as `EventStream` events.
+            Some(remote_event) = remote_rx.recv() => {
+                #[cfg(feature = "attach")]
+                if matches!(remote_event, crossterm::event::Event::Resize(_, _)) {
+                    // Remote Hello (and real client resizes) must produce
+                    // an immediate full frame: the client starts from a
+                    // blank screen, but a plain render would diff against
+                    // the server's current screen, emit nothing (no state
+                    // changed), and leave the client blank until the next
+                    // keystroke.
+                    force_full_repaint(&mut terminal, &mode, &processes);
+                }
+                let quit = dispatch_event(
+                    remote_event,
+                    &mut mode,
+                    &mut projects,
+                    &mut next_project_id,
+                    &mut processes,
+                    &mut next_id,
+                    &pty_system,
+                    &mut terminal,
+                    &mut term_rows,
+                    &mut term_cols,
+                    cli.dont_save,
+                    cli.no_worktree,
+                    &mut suppress_quit,
+                    &mut confirm_quit,
+                )?;
+                if quit {
+                    restore_terminal(&mut terminal, supports_keyboard_enhancement);
+                    #[cfg(feature = "attach")]
+                    shutdown_attach(&tee, &mut attach_guard);
+                    return Ok(());
+                }
+            }
             maybe_event = reader.next() => {
                 match maybe_event {
                     Some(Ok(event)) => {
-                        let was_tty_before_event = matches!(mode, Mode::Tty { .. } | Mode::TempTty { .. });
-                        // Snapshot the TTY identity *before* dispatch: after
-                        // `process_event` runs, `mode` may already be the new
-                        // mode and we can no longer tell which process's cache
-                        // to invalidate.
-                        let exited_tty_pid = match &mode {
-                            Mode::Tty { process_id } => Some(*process_id),
-                            _ => None,
-                        };
-                        let was_temp_tty = matches!(mode, Mode::TempTty { .. });
-
-                        let should_quit = process_event(
+                        let quit = dispatch_event(
+                            event,
                             &mut mode,
                             &mut projects,
                             &mut next_project_id,
                             &mut processes,
                             &mut next_id,
                             &pty_system,
-                            event,
+                            &mut terminal,
                             &mut term_rows,
                             &mut term_cols,
-                            &entries,
                             cli.dont_save,
                             cli.no_worktree,
-                            confirm_quit,
+                            &mut suppress_quit,
+                            &mut confirm_quit,
                         )?;
-
-                        // Any transition *into* a TTY mode must start from a
-                        // blank physical screen with a dropped diff cache, or
-                        // the first frame diffs TTY content against the stale
-                        // TUI screen (= mixed TUI/TTY rendering). TTY(A) ->
-                        // TTY(B) (e.g. re-entering after spawn) needs the same
-                        // fresh full repaint for the new child.
-                        let entered_tty: Option<usize> = match &mode {
-                            Mode::Tty { process_id }
-                                if !was_tty_before_event || Some(*process_id) != exited_tty_pid =>
-                            {
-                                Some(*process_id)
-                            }
-                            _ => None,
-                        };
-                        if let Some(pid) = entered_tty {
-                            if let Some(proc) = processes.iter().find(|p| p.id == pid) {
-                                let _ = enter_tty_real(&mut terminal, proc);
-                            }
-                        } else if matches!(mode, Mode::TempTty { .. }) && !was_tty_before_event
-                            && let Mode::TempTty { process, .. } = &mode
-                        {
-                            let _ = enter_tty_real(&mut terminal, process);
-                        }
-
-                        if was_tty_before_event && matches!(mode, Mode::Normal { .. }) {
-                            suppress_quit = true;
-                            confirm_quit = false;
-                            // Leaving raw mode: the physical screen holds TTY
-                            // content and the vt100 cache describes it. Either
-                            // must be discarded before the TUI redraws.
-                            // (`wipe_real`, not `terminal.clear()` — the
-                            // latter blocks ~500ms on a cursor query.)
-                            if let Some(pid) = exited_tty_pid {
-                                if let Some(proc) = processes.iter().find(|p| p.id == pid) {
-                                    let _ = exit_tty_real(&mut terminal, proc);
-                                } else {
-                                    let _ = wipe_real(&mut terminal);
-                                }
-                            } else if was_temp_tty {
-                                // TempTty's Process was moved out of `mode`
-                                // already; fall back to a bare wipe — its
-                                // cache dies with the value.
-                                let _ = wipe_real(&mut terminal);
-                            }
-                            execute!(
-                                terminal.backend_mut(),
-                                SetAttribute(Attribute::Reset),
-                                SetForegroundColor(Color::Reset),
-                                SetBackgroundColor(Color::Reset)
-                            )?;
-                            let entries = build_entries(&projects, &processes);
-                            sync_statuses(&processes);
-                            render(&mut terminal, &mode, &entries, &projects, &processes, term_rows, term_cols, confirm_quit, cli.no_worktree)?;
-                        } else if should_quit {
-                            if suppress_quit {
-                                suppress_quit = false;
-                                confirm_quit = true;
-                                let entries = build_entries(&projects, &processes);
-                                render(&mut terminal, &mode, &entries, &projects, &processes, term_rows, term_cols, confirm_quit, cli.no_worktree)?;
-                                continue;
-                            }
-                            let has_git_conflict = processes.iter().any(|p| p.status.load(Ordering::SeqCst) == STATUS_GIT_CONFLICT);
-                            if has_git_conflict && !confirm_quit {
-                                confirm_quit = true;
-                                let entries = build_entries(&projects, &processes);
-                                render(&mut terminal, &mode, &entries, &projects, &processes, term_rows, term_cols, confirm_quit, cli.no_worktree)?;
-                                continue;
-                            }
-                            let _ = execute!(terminal.backend_mut(), DisableBracketedPaste);
-                            if supports_keyboard_enhancement {
-                                let _ = execute!(
-                                    terminal.backend_mut(),
-                                    PopKeyboardEnhancementFlags
-                                );
-                            }
-                            let _ = execute!(
-                                terminal.backend_mut(),
-                                cursor::Show,
-                                terminal::LeaveAlternateScreen
-                            );
-                            let _ = disable_raw_mode();
+                        if quit {
+                            restore_terminal(&mut terminal, supports_keyboard_enhancement);
+                            #[cfg(feature = "attach")]
+                            shutdown_attach(&tee, &mut attach_guard);
                             return Ok(());
-                        } else {
-                            if matches!(mode, Mode::Normal { .. }) {
-                                suppress_quit = false;
-                                confirm_quit = false;
-                            }
-                            let entries = build_entries(&projects, &processes);
-                            if let Mode::Normal { ref mut selected } = mode {
-                                if entries.is_empty() {
-                                    *selected = 0;
-                                } else if *selected >= entries.len() {
-                                    *selected = entries.len() - 1;
-                                }
-                            }
-                            render(&mut terminal, &mode, &entries, &projects, &processes, term_rows, term_cols, confirm_quit, cli.no_worktree)?;
                         }
                     }
                     Some(Err(e)) => {
                         eprintln!("Event stream error: {e}. Shutting down.");
-                        let _ = execute!(terminal.backend_mut(), DisableBracketedPaste);
-                        if supports_keyboard_enhancement {
-                            let _ = execute!(
-                                terminal.backend_mut(),
-                                PopKeyboardEnhancementFlags
-                            );
-                        }
-                        let _ = execute!(
-                            terminal.backend_mut(),
-                            cursor::Show,
-                            terminal::LeaveAlternateScreen
-                        );
-                        let _ = disable_raw_mode();
+                        restore_terminal(&mut terminal, supports_keyboard_enhancement);
+                        #[cfg(feature = "attach")]
+                        shutdown_attach(&tee, &mut attach_guard);
                         return Err(e);
                     }
                     None => {
-                        let _ = execute!(terminal.backend_mut(), DisableBracketedPaste);
-                        if supports_keyboard_enhancement {
-                            let _ = execute!(
-                                terminal.backend_mut(),
-                                PopKeyboardEnhancementFlags
-                            );
-                        }
-                        let _ = execute!(
-                            terminal.backend_mut(),
-                            cursor::Show,
-                            terminal::LeaveAlternateScreen
-                        );
-                        let _ = disable_raw_mode();
+                        restore_terminal(&mut terminal, supports_keyboard_enhancement);
+                        #[cfg(feature = "attach")]
+                        shutdown_attach(&tee, &mut attach_guard);
                         return Ok(());
                     }
                 }
             }
         }
     }
+}
+
+/// Wait for the next attach connection. Returns `None` when there is no
+/// listener (attach disabled at runtime, or compiled without the feature —
+/// pending forever so the `select!` branch stays dormant).
+#[cfg(feature = "attach")]
+async fn accept_attach_conn(
+    listener: &mut Option<tokio::net::UnixListener>,
+) -> Option<tokio::net::UnixStream> {
+    match listener.as_mut() {
+        None => std::future::pending().await,
+        Some(l) => l.accept().await.map(|(s, _)| Some(s)).unwrap_or(None),
+    }
+}
+
+#[cfg(not(feature = "attach"))]
+async fn accept_attach_conn(_listener: &mut Option<()>) -> Option<tokio::net::UnixStream> {
+    std::future::pending().await
+}
+
+/// Tell the attached client to go away and unlink our socket. Runs on every
+/// server exit path (also via `AttachListener::drop` as a backstop).
+#[cfg(feature = "attach")]
+fn shutdown_attach(tee: &attach::TeeWriter, guard: &mut Option<attach::AttachListener>) {
+    tee.send_bye();
+    if let Some(g) = guard.as_mut() {
+        g.shutdown();
+    }
+}
+
+/// Shared event dispatch for local (`EventStream`) and remote (attach
+/// client) events: TTY enter/exit framing, quit confirmation, and render.
+/// Returns `true` when the server should exit.
+#[allow(clippy::too_many_arguments)]
+fn dispatch_event<W: std::io::Write>(
+    event: crossterm::event::Event,
+    mode: &mut Mode,
+    projects: &mut Vec<Project>,
+    next_project_id: &mut usize,
+    processes: &mut Vec<Process>,
+    next_id: &mut usize,
+    pty_system: &NativePtySystem,
+    terminal: &mut Terminal<CrosstermBackend<W>>,
+    term_rows: &mut u16,
+    term_cols: &mut u16,
+    dont_save: bool,
+    no_worktree: bool,
+    suppress_quit: &mut bool,
+    confirm_quit: &mut bool,
+) -> std::io::Result<bool> {
+    let was_tty_before_event = matches!(mode, Mode::Tty { .. } | Mode::TempTty { .. });
+    // Snapshot the TTY identity *before* dispatch: after `process_event`
+    // runs, `mode` may already be the new mode and we can no longer tell
+    // which process's cache to invalidate.
+    let exited_tty_pid = match &mode {
+        Mode::Tty { process_id } => Some(*process_id),
+        _ => None,
+    };
+    let was_temp_tty = matches!(mode, Mode::TempTty { .. });
+
+    let entries = build_entries(projects, processes);
+    let should_quit = process_event(
+        mode,
+        projects,
+        next_project_id,
+        processes,
+        next_id,
+        pty_system,
+        event,
+        term_rows,
+        term_cols,
+        &entries,
+        dont_save,
+        no_worktree,
+        *confirm_quit,
+    )?;
+
+    // Any transition *into* a TTY mode must start from a blank physical
+    // screen with a dropped diff cache, or the first frame diffs TTY content
+    // against the stale TUI screen (= mixed TUI/TTY rendering). TTY(A) ->
+    // TTY(B) (e.g. re-entering after spawn) needs the same fresh full
+    // repaint for the new child.
+    let entered_tty: Option<usize> = match &mode {
+        Mode::Tty { process_id }
+            if !was_tty_before_event || Some(*process_id) != exited_tty_pid =>
+        {
+            Some(*process_id)
+        }
+        _ => None,
+    };
+    if let Some(pid) = entered_tty {
+        if let Some(proc) = processes.iter().find(|p| p.id == pid) {
+            let _ = enter_tty_real(terminal, proc);
+        }
+    } else if matches!(mode, Mode::TempTty { .. })
+        && !was_tty_before_event
+        && let Mode::TempTty { process, .. } = &mode
+    {
+        let _ = enter_tty_real(terminal, process);
+    }
+
+    if was_tty_before_event && matches!(mode, Mode::Normal { .. }) {
+        *suppress_quit = true;
+        *confirm_quit = false;
+        // Leaving raw mode: the physical screen holds TTY content and the
+        // vt100 cache describes it. Either must be discarded before the TUI
+        // redraws. (`wipe_real`, not `terminal.clear()` — the latter blocks
+        // ~500ms on a cursor query.)
+        if let Some(pid) = exited_tty_pid {
+            if let Some(proc) = processes.iter().find(|p| p.id == pid) {
+                let _ = exit_tty_real(terminal, proc);
+            } else {
+                let _ = wipe_real(terminal);
+            }
+        } else if was_temp_tty {
+            // TempTty's Process was moved out of `mode` already; fall back to
+            // a bare wipe — its cache dies with the value.
+            let _ = wipe_real(terminal);
+        }
+        execute!(
+            terminal.backend_mut(),
+            SetAttribute(Attribute::Reset),
+            SetForegroundColor(Color::Reset),
+            SetBackgroundColor(Color::Reset)
+        )?;
+        let entries = build_entries(projects, processes);
+        sync_statuses(processes);
+        render(
+            terminal,
+            mode,
+            &entries,
+            projects,
+            processes,
+            *term_rows,
+            *term_cols,
+            *confirm_quit,
+            no_worktree,
+        )?;
+        return Ok(false);
+    }
+
+    if should_quit {
+        if *suppress_quit {
+            *suppress_quit = false;
+            *confirm_quit = true;
+            let entries = build_entries(projects, processes);
+            render(
+                terminal,
+                mode,
+                &entries,
+                projects,
+                processes,
+                *term_rows,
+                *term_cols,
+                *confirm_quit,
+                no_worktree,
+            )?;
+            return Ok(false);
+        }
+        let has_git_conflict = processes
+            .iter()
+            .any(|p| p.status.load(Ordering::SeqCst) == STATUS_GIT_CONFLICT);
+        if has_git_conflict && !*confirm_quit {
+            *confirm_quit = true;
+            let entries = build_entries(projects, processes);
+            render(
+                terminal,
+                mode,
+                &entries,
+                projects,
+                processes,
+                *term_rows,
+                *term_cols,
+                *confirm_quit,
+                no_worktree,
+            )?;
+            return Ok(false);
+        }
+        return Ok(true);
+    }
+
+    if matches!(mode, Mode::Normal { .. }) {
+        *suppress_quit = false;
+        *confirm_quit = false;
+    }
+    let entries = build_entries(projects, processes);
+    if let Mode::Normal { selected } = mode {
+        if entries.is_empty() {
+            *selected = 0;
+        } else if *selected >= entries.len() {
+            *selected = entries.len() - 1;
+        }
+    }
+    render(
+        terminal,
+        mode,
+        &entries,
+        projects,
+        processes,
+        *term_rows,
+        *term_cols,
+        *confirm_quit,
+        no_worktree,
+    )?;
+    Ok(false)
+}
+
+/// Leave the alternate screen and raw mode. Idempotent best-effort: every
+/// exit path (quit, event error, stream end, client-detach race) funnels here
+/// so the physical terminal is never left hidden/raw.
+fn restore_terminal<W: std::io::Write>(
+    terminal: &mut Terminal<CrosstermBackend<W>>,
+    supports_keyboard_enhancement: bool,
+) {
+    let _ = execute!(terminal.backend_mut(), DisableBracketedPaste);
+    if supports_keyboard_enhancement {
+        let _ = execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags);
+    }
+    let _ = execute!(
+        terminal.backend_mut(),
+        cursor::Show,
+        terminal::LeaveAlternateScreen
+    );
+    let _ = disable_raw_mode();
 }
