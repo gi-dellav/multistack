@@ -296,7 +296,7 @@ async fn run_server(cli: Cli) -> std::io::Result<()> {
             }
         }
 
-        sync_statuses(&processes);
+        sync_statuses(&mut processes);
 
         tokio::select! {
                 _ = render_interval.tick() => {

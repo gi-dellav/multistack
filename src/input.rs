@@ -1141,6 +1141,9 @@ mod tests {
             kill_on_drop: false,
             name_shared: None,
             prev_screen: std::sync::Arc::new(parking_lot::Mutex::new(None)),
+            exit_code: std::sync::Arc::new(parking_lot::Mutex::new(None)),
+            exit_signal: std::sync::Arc::new(parking_lot::Mutex::new(None)),
+            log_buffer: std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
         }
     }
 

@@ -34,7 +34,20 @@ pub struct Process {
     pub kill_on_drop: bool,
     pub name_shared: Option<Arc<Mutex<String>>>,
     pub prev_screen: Arc<Mutex<Option<vt100::Screen>>>,
+    /// Exit code captured via `try_wait()` polling in `sync_statuses`.
+    /// `None` = still running (or unknown, e.g. killed on drop).
+    pub exit_code: Arc<Mutex<Option<u32>>>,
+    /// Signal name when the child died from a signal (unix), if known.
+    pub exit_signal: Arc<Mutex<Option<String>>>,
+    /// Raw PTY bytes (capped ring) used to show a log tail when the
+    /// subprocess fails. Appended by the reader thread.
+    pub log_buffer: Arc<Mutex<Vec<u8>>>,
 }
+
+/// Max raw bytes kept per process for failure diagnosis (~64 KiB).
+pub const LOG_BUFFER_CAP: usize = 64 * 1024;
+/// How many tail lines the TUI error pane shows.
+pub const LOG_TAIL_LINES: usize = 6;
 
 impl Process {
     /// Directory the agent actually works in: the worktree when one was
@@ -46,6 +59,91 @@ impl Process {
     }
 }
 
+/// Append raw PTY bytes to the capped log ring.
+pub fn push_log(log: &Mutex<Vec<u8>>, bytes: &[u8]) {
+    let mut guard = log.lock();
+    if bytes.len() >= LOG_BUFFER_CAP {
+        *guard = bytes[bytes.len() - LOG_BUFFER_CAP..].to_vec();
+        return;
+    }
+    if guard.len() + bytes.len() > LOG_BUFFER_CAP {
+        let overflow = guard.len() + bytes.len() - LOG_BUFFER_CAP;
+        guard.drain(..overflow);
+    }
+    guard.extend_from_slice(bytes);
+}
+
+/// Last `n` non-empty plain-text lines from raw PTY bytes: strips ANSI/CSI
+/// via a scratch `vt100::Parser` sized to the current screen so wrapped
+/// output reflows instead of truncating.
+pub fn log_tail_lines(log: &[u8], rows: u16, cols: u16, n: usize) -> Vec<String> {
+    if log.is_empty() || n == 0 {
+        return Vec::new();
+    }
+    let rows = rows.max(1);
+    let cols = cols.max(1);
+    let mut parser = vt100::Parser::new(rows, cols, 0);
+    parser.process(log);
+    let contents = parser.screen().contents();
+    let lines: Vec<String> = contents
+        .lines()
+        .map(str::trim_end)
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| {
+            let mut s: String = l.chars().take(cols as usize).collect();
+            if l.chars().count() > cols as usize {
+                // `cols` is u16 >= 1 so saturating_sub is safe.
+                while s.chars().count() > (cols as usize).saturating_sub(1) {
+                    s.pop();
+                }
+                s.push('…');
+            }
+            s
+        })
+        .collect();
+    let start = lines.len().saturating_sub(n);
+    lines[start..].to_vec()
+}
+
+/// True when the process exited with a non-zero code or terminating signal.
+pub fn failed(proc: &Process) -> bool {
+    if proc.exit_signal.lock().is_some() {
+        return true;
+    }
+    matches!(*proc.exit_code.lock(), Some(code) if code != 0)
+}
+
+/// One-line human-readable exit reason, e.g. `exit code 1` or
+/// `killed by SIGKILL`. Empty when the child is still running.
+pub fn exit_reason(proc: &Process) -> Option<String> {
+    if let Some(sig) = proc.exit_signal.lock().clone() {
+        return Some(format!("killed by {sig}"));
+    }
+    proc.exit_code
+        .lock()
+        .map(|code| format!("exit code {code}"))
+}
+
+/// Poll a live child's `try_wait()` once and stash the result. Returns the
+/// exit status when the child has terminated.
+fn poll_exit(proc: &mut Process) -> Option<portable_pty::ExitStatus> {
+    let child = proc.child.as_mut()?;
+    // `try_wait` succeeds exactly once: after it returns `Some`, the child
+    // is reaped and later calls may error — hence stash in Arcs.
+    if proc.exit_code.lock().is_some() || proc.exit_signal.lock().is_some() {
+        return None;
+    }
+    match child.try_wait() {
+        Ok(Some(status)) => {
+            *proc.exit_code.lock() = Some(status.exit_code());
+            if let Some(sig) = status.signal() {
+                *proc.exit_signal.lock() = Some(sig.to_string());
+            }
+            Some(status)
+        }
+        Ok(None) | Err(_) => None,
+    }
+}
 impl Drop for Process {
     fn drop(&mut self) {
         if let Some(ref flag) = self.shutdown_flag {
@@ -106,24 +204,27 @@ pub fn check_tty_alive(mode: &Mode, processes: &mut Vec<Process>) -> Option<usiz
     match mode {
         Mode::Tty { process_id } => {
             let pid = *process_id;
-            let alive = processes
-                .iter()
-                .find(|p| p.id == pid)
-                .map(|p| p.alive.load(Ordering::SeqCst));
-            match alive {
-                Some(false) | None => {
-                    if let Some(dir) = processes
-                        .iter()
-                        .find(|p| p.id == pid)
-                        .map(|p| p.project_dir.clone())
-                    {
-                        run_speck_apply_if_present(&dir);
-                    }
-                    processes.retain(|p| p.id != pid);
-                    Some(0)
-                }
-                _ => None,
+            let Some(idx) = processes.iter().position(|p| p.id == pid) else {
+                processes.retain(|p| p.id != pid);
+                return Some(0);
+            };
+            if processes[idx].alive.load(Ordering::SeqCst) {
+                return None;
             }
+            // Reap the exit status now so the dead agent keeps its
+            // failure reason for the TUI error view.
+            poll_exit(&mut processes[idx]);
+            let dir = processes[idx].project_dir.clone();
+            let was_failed = failed(&processes[idx]);
+            run_speck_apply_if_present(&dir);
+            // Keep failed agents in the list so the user can see the
+            // exit code + log tail (`d` dismisses explicitly). Clean
+            // exits are still pruned immediately.
+            if was_failed {
+                return Some(0);
+            }
+            processes.retain(|p| p.id != pid);
+            Some(0)
         }
         Mode::TempTty {
             process,
@@ -183,6 +284,8 @@ pub fn spawn_pty(
     let parser_clone = parser.clone();
     let alive = Arc::new(AtomicBool::new(true));
     let alive_clone = alive.clone();
+    let log_buffer = Arc::new(Mutex::new(Vec::new()));
+    let log_clone = log_buffer.clone();
 
     std::thread::spawn(move || {
         let mut reader = reader;
@@ -191,6 +294,7 @@ pub fn spawn_pty(
             match reader.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
+                    push_log(&log_clone, &buf[..n]);
                     parser_clone.lock().process(&buf[..n]);
                 }
                 Err(_) => break,
@@ -227,6 +331,9 @@ pub fn spawn_pty(
         kill_on_drop: false,
         name_shared: None,
         prev_screen: Arc::new(Mutex::new(None)),
+        exit_code: Arc::new(Mutex::new(None)),
+        exit_signal: Arc::new(Mutex::new(None)),
+        log_buffer,
     })
 }
 
@@ -300,8 +407,12 @@ pub fn run_speck_apply_if_present(dir: &str) {
     }
 }
 
-pub fn sync_statuses(processes: &[Process]) {
-    for p in processes {
+pub fn sync_statuses(processes: &mut [Process]) {
+    for p in processes.iter_mut() {
+        // Reap the exit status as soon as the child terminates, even while
+        // its PTY reader thread is still draining output. `failed()` then
+        // knows the exit code without waiting for EOF.
+        poll_exit(p);
         if p.alive.load(Ordering::SeqCst) {
             continue;
         }
@@ -333,10 +444,18 @@ pub fn sync_statuses(processes: &[Process]) {
             }
             #[cfg(not(test))]
             {
-                let _ = Notification::new()
-                    .summary("Agent died")
-                    .body(&format!("{} has terminated unexpectedly", &p.name))
-                    .show();
+                if failed(p) {
+                    let reason = exit_reason(p).unwrap_or_else(|| "failed".to_string());
+                    let _ = Notification::new()
+                        .summary("Agent failed")
+                        .body(&format!("{} {reason}", &p.name))
+                        .show();
+                } else {
+                    let _ = Notification::new()
+                        .summary("Agent died")
+                        .body(&format!("{} has terminated unexpectedly", &p.name))
+                        .show();
+                }
             }
         }
     }
@@ -377,19 +496,22 @@ mod tests {
             kill_on_drop: false,
             name_shared: None,
             prev_screen: Arc::new(parking_lot::Mutex::new(None)),
+            exit_code: Arc::new(parking_lot::Mutex::new(None)),
+            exit_signal: Arc::new(parking_lot::Mutex::new(None)),
+            log_buffer: Arc::new(parking_lot::Mutex::new(Vec::new())),
         }
     }
 
     #[test]
     fn test_sync_statuses_alive_working_unchanged() {
-        let p = make_test_process(true, status::STATUS_WORKING, 5000, true);
-        sync_statuses(std::slice::from_ref(&p));
+        let mut p = make_test_process(true, status::STATUS_WORKING, 5000, true);
+        sync_statuses(std::slice::from_mut(&mut p));
     }
 
     #[test]
     fn test_sync_statuses_dead_marks_dead_and_credits_time() {
-        let p = make_test_process(false, status::STATUS_WORKING, 5000, true);
-        sync_statuses(std::slice::from_ref(&p));
+        let mut p = make_test_process(false, status::STATUS_WORKING, 5000, true);
+        sync_statuses(std::slice::from_mut(&mut p));
         assert_eq!(p.status.load(Ordering::SeqCst), status::STATUS_DEAD);
         assert!(p.active_ms.load(Ordering::SeqCst) >= 5000);
         assert!(p.cycle_start.lock().is_none());
@@ -397,31 +519,31 @@ mod tests {
 
     #[test]
     fn test_sync_statuses_dead_no_cycle_still_marks_dead() {
-        let p = make_test_process(false, status::STATUS_WORKING, 5000, false);
-        sync_statuses(std::slice::from_ref(&p));
+        let mut p = make_test_process(false, status::STATUS_WORKING, 5000, false);
+        sync_statuses(std::slice::from_mut(&mut p));
         assert_eq!(p.status.load(Ordering::SeqCst), status::STATUS_DEAD);
         assert_eq!(p.active_ms.load(Ordering::SeqCst), 5000);
     }
 
     #[test]
     fn test_sync_statuses_already_finished_unchanged() {
-        let p = make_test_process(false, status::STATUS_FINISHED, 10000, false);
-        sync_statuses(std::slice::from_ref(&p));
+        let mut p = make_test_process(false, status::STATUS_FINISHED, 10000, false);
+        sync_statuses(std::slice::from_mut(&mut p));
         assert_eq!(p.status.load(Ordering::SeqCst), status::STATUS_FINISHED);
         assert_eq!(p.active_ms.load(Ordering::SeqCst), 10000);
     }
 
     #[test]
     fn test_sync_statuses_not_yet_alive_unchanged() {
-        let p = make_test_process(true, status::STATUS_NOT_YET, 0, false);
-        sync_statuses(std::slice::from_ref(&p));
+        let mut p = make_test_process(true, status::STATUS_NOT_YET, 0, false);
+        sync_statuses(std::slice::from_mut(&mut p));
         assert_eq!(p.status.load(Ordering::SeqCst), status::STATUS_NOT_YET);
     }
 
     #[test]
     fn test_sync_statuses_git_conflict_preserved() {
-        let p = make_test_process(false, status::STATUS_GIT_CONFLICT, 10000, false);
-        sync_statuses(std::slice::from_ref(&p));
+        let mut p = make_test_process(false, status::STATUS_GIT_CONFLICT, 10000, false);
+        sync_statuses(std::slice::from_mut(&mut p));
         assert_eq!(p.status.load(Ordering::SeqCst), status::STATUS_GIT_CONFLICT);
         assert_eq!(p.active_ms.load(Ordering::SeqCst), 10000);
         assert!(p.cycle_start.lock().is_none());
@@ -589,5 +711,76 @@ mod tests {
         assert!(formatted.windows(3).any(|w| w == b"red"));
         let state = screen.state_formatted();
         assert!(!state.is_empty());
+    }
+
+    #[test]
+    fn test_failed_none_when_running() {
+        let p = make_test_process(true, status::STATUS_WORKING, 0, false);
+        assert!(!failed(&p));
+        assert!(exit_reason(&p).is_none());
+    }
+
+    #[test]
+    fn test_failed_nonzero_exit_code() {
+        let p = make_test_process(false, status::STATUS_DEAD, 0, false);
+        *p.exit_code.lock() = Some(1);
+        assert!(failed(&p));
+        assert_eq!(exit_reason(&p).as_deref(), Some("exit code 1"));
+    }
+
+    #[test]
+    fn test_failed_zero_exit_code_is_clean() {
+        let p = make_test_process(false, status::STATUS_FINISHED, 0, false);
+        *p.exit_code.lock() = Some(0);
+        assert!(!failed(&p));
+        assert_eq!(exit_reason(&p).as_deref(), Some("exit code 0"));
+    }
+
+    #[test]
+    fn test_failed_signal() {
+        let p = make_test_process(false, status::STATUS_DEAD, 0, false);
+        *p.exit_signal.lock() = Some("SIGKILL".to_string());
+        assert!(failed(&p));
+        assert_eq!(exit_reason(&p).as_deref(), Some("killed by SIGKILL"));
+    }
+
+    #[test]
+    fn test_check_tty_alive_failed_kept_for_inspection() {
+        let p = make_test_process(false, status::STATUS_DEAD, 0, false);
+        *p.exit_code.lock() = Some(2);
+        let pid = p.id;
+        let mut processes = vec![p];
+        let mode = crate::Mode::Tty { process_id: pid };
+        let result = check_tty_alive(&mode, &mut processes);
+        assert_eq!(result, Some(0));
+        // Failed agent stays in the list so its logs can be inspected.
+        assert_eq!(processes.len(), 1);
+        assert!(failed(&processes[0]));
+    }
+
+    #[test]
+    fn test_push_log_caps_at_64k() {
+        let log = parking_lot::Mutex::new(Vec::new());
+        push_log(&log, &vec![b'x'; LOG_BUFFER_CAP + 100]);
+        assert_eq!(log.lock().len(), LOG_BUFFER_CAP);
+        push_log(&log, b"tail");
+        assert_eq!(log.lock().len(), LOG_BUFFER_CAP);
+        assert!(log.lock().ends_with(b"tail"));
+    }
+
+    #[test]
+    fn test_log_tail_lines_strips_ansi_and_takes_tail() {
+        let mut raw = Vec::new();
+        for i in 0..10 {
+            raw.extend_from_slice(format!("\x1b[31mline{i}\x1b[0m\r\n").as_bytes());
+        }
+        let tail = log_tail_lines(&raw, 24, 80, 3);
+        assert_eq!(tail, vec!["line7", "line8", "line9"]);
+    }
+
+    #[test]
+    fn test_log_tail_lines_empty() {
+        assert!(log_tail_lines(&[], 24, 80, 6).is_empty());
+        assert!(log_tail_lines(b"hi", 24, 80, 0).is_empty());
     }
 }

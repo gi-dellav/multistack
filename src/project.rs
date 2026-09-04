@@ -79,13 +79,16 @@ mod tests {
             alive: Arc::new(AtomicBool::new(true)),
             status: Arc::new(AtomicU8::new(0)),
             active_ms: Arc::new(AtomicU64::new(0)),
-            cycle_start: Arc::new(Mutex::new(None)),
+            cycle_start: Arc::new(parking_lot::Mutex::new(None)),
             status_socket_path: None,
             shutdown_flag: None,
             listener_thread: None,
             kill_on_drop: false,
             name_shared: None,
             prev_screen: Arc::new(Mutex::new(None)),
+            exit_code: Arc::new(Mutex::new(None)),
+            exit_signal: Arc::new(Mutex::new(None)),
+            log_buffer: Arc::new(Mutex::new(Vec::new())),
         }
     }
 

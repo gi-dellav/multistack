@@ -278,10 +278,15 @@ fn process_item(proc: &Process) -> ListItem<'static> {
     let color = status::status_color(status_val);
     let cycle = proc.cycle_start.lock();
     let timer = status::format_timer(proc.active_ms.load(Ordering::SeqCst), &cycle);
-    let line = Line::from(Span::styled(
-        format!("  {} {}  {}", prefix, proc.name, timer),
-        Style::default().fg(color),
-    ));
+    let mut text = format!("  {} {}  {}", prefix, proc.name, timer);
+    // Surface the failure reason inline so a dead agent explains itself
+    // without forcing the user to re-enter its TTY.
+    if crate::process::failed(proc)
+        && let Some(reason) = crate::process::exit_reason(proc)
+    {
+        text.push_str(&format!("  ({reason})"));
+    }
+    let line = Line::from(Span::styled(text, Style::default().fg(color)));
     ListItem::new(line)
 }
 
@@ -292,21 +297,63 @@ fn render_normal<B: Backend>(
     projects: &[Project],
     processes: &[Process],
     selected: usize,
-    _rows: u16,
+    rows: u16,
     cols: u16,
     confirm_quit: bool,
     no_worktree: bool,
 ) -> std::io::Result<()> {
+    // Failure detail for the selected row: exit reason + log tail. Computed
+    // outside the draw closure (locks + vt100 replay are not render work).
+    let error_detail: Option<(String, Vec<String>)> = entries
+        .get(selected)
+        .and_then(|e| match e {
+            ListEntry::Agent(pid) => find_process(processes, *pid),
+            _ => None,
+        })
+        .filter(|proc| crate::process::failed(proc))
+        .map(|proc| {
+            let reason = crate::process::exit_reason(proc).unwrap_or_else(|| "failed".to_string());
+            let tail = {
+                let log = proc.log_buffer.lock();
+                crate::process::log_tail_lines(
+                    &log,
+                    rows,
+                    cols,
+                    crate::process::LOG_TAIL_LINES,
+                )
+            };
+            (reason, tail)
+        });
     terminal
         .draw(|frame| {
-        let layout = Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Fill(1),
-            Constraint::Length(1),
-        ]);
-        let [title_area, sep_area, _, list_area, help_area] = frame.area().layout(&layout);
+        let error_rows: u16 = error_detail.as_ref().map_or(0, |(_, tail)| {
+            // Header + reason + tail lines, clamped so the agent list keeps
+            // at least one visible row.
+            let want = 2 + tail.len().max(1) as u16;
+            let max = frame.area().height.saturating_sub(5).max(1);
+            want.min(max)
+        });
+        let layout = if error_rows > 0 {
+            Layout::vertical([
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Fill(1),
+                Constraint::Length(error_rows),
+                Constraint::Length(1),
+            ])
+        } else {
+            Layout::vertical([
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Fill(1),
+                Constraint::Length(0),
+                Constraint::Length(1),
+            ])
+        };
+        let [title_area, sep_area, _, list_area, error_area, help_area] =
+            frame.area().layout(&layout);
 
         let title = Line::from(vec![Span::styled(
             "Multistack",
@@ -351,6 +398,39 @@ fn render_normal<B: Backend>(
                 .highlight_symbol("> ");
             let mut list_state = ListState::default().with_selected(Some(selected));
             frame.render_stateful_widget(list, list_area, &mut list_state);
+        }
+
+        if let Some((reason, tail)) = error_detail.as_ref() {
+            use ratatui::style::Color;
+            use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+            let mut text = vec![Line::from(vec![
+                Span::styled(
+                    "✖ failed: ",
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(reason.clone(), Style::default().fg(Color::Red)),
+                Span::styled(
+                    "  — Enter: full log  d: dismiss",
+                    Style::default().add_modifier(Modifier::DIM),
+                ),
+            ])];
+            if tail.is_empty() {
+                text.push(Line::from(Span::styled(
+                    "(no output captured)",
+                    Style::default().add_modifier(Modifier::DIM),
+                )));
+            } else {
+                for line in tail {
+                    text.push(Line::from(Span::styled(
+                        format!("│ {line}"),
+                        Style::default().fg(Color::Red),
+                    )));
+                }
+            }
+            let para = Paragraph::new(text)
+                .block(Block::default().borders(Borders::TOP))
+                .wrap(Wrap { trim: true });
+            frame.render_widget(para, error_area);
         }
 
         let help = if confirm_quit {
@@ -621,6 +701,9 @@ mod tests {
             kill_on_drop: false,
             name_shared: None,
             prev_screen: Arc::new(Mutex::new(None)),
+            exit_code: Arc::new(Mutex::new(None)),
+            exit_signal: Arc::new(Mutex::new(None)),
+            log_buffer: Arc::new(Mutex::new(content.to_vec())),
         }
     }
 
