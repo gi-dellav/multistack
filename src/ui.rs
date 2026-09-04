@@ -65,6 +65,179 @@ fn reset_tui_attributes<W: Write>(out: &mut CrosstermBackend<W>) -> std::io::Res
     Ok(())
 }
 
+/// Mirror a child's vt100 input-mode state onto the *physical* terminal.
+///
+/// A full-screen app (vim, less, lazygit, helix, ...) enables modes the TUI
+/// itself never touches: application cursor/keypad (`ESC[?1h`, `ESC=`),
+/// mouse reporting (`ESC[?1000/1002/1003h`), bracketed paste (`ESC[?2004h`),
+/// and cursor visibility. Because the child only ever talks to our vt100
+/// parser — never to the real terminal — the physical terminal must be moved
+/// into the matching state *for* it, or edge cases break visibly:
+/// - arrow keys insert `A/B/C/D` instead of moving (app-cursor off),
+/// - mouse clicks/drags go to the wrong widget (mouse mode off),
+/// - pastes lack `ESC[200~...201~` framing so bracketed-paste readers mangle
+///   them (bracketed paste off),
+/// - a child that hides the cursor leaves it invisible after exit.
+///
+/// The physical side is tracked alongside the vt100 diff cache (`prev`
+/// holds the `Screen` whose modes were last pushed out). A `None` cache —
+/// i.e. every full repaint — re-pushes *all* modes, so attach clients and
+/// resize paths inherit the correct state from the next frame for free.
+/// Only a diff-vs-previous is emitted on steady-state ticks (same
+/// no-flicker/no-extra-bytes discipline as `tty_frame`), so an idle shell
+/// costs zero extra bytes per 50ms tick.
+///
+/// `prev=None` (full repaint) re-pushes *every* mode, disabling the ones the
+/// child does not want — this closes the gap where vt100's own
+/// `state_formatted` emits only transitions and would otherwise leave
+/// a stale `ESC[?1000h` from a previous child active.
+///
+/// Defensive by design: callers write the returned bytes with `let _ =`
+/// (best-effort) — TTY framing must never hard-fail a mode switch over a
+/// transient backend error. A lost sequence is always healed by the next
+/// full repaint.
+#[allow(clippy::wrong_self_convention)]
+fn tty_input_mode_bytes(current: &vt100::Screen, prev: Option<&vt100::Screen>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    // Local terminal state defaults: our own TUI runs with application
+    // cursor/keypad off, mouse reporting off, bracketed paste ON (set once in
+    // `run_server`), cursor visible. A full repaint must therefore *disable*
+    // the modes the TUI never enables and *enable* the ones it does — the
+    // child may have been spawned from a state where they still held.
+    match prev {
+        None => {
+            buf.extend_from_slice(if current.application_cursor() {
+                b"\x1b[?1h"
+            } else {
+                b"\x1b[?1l"
+            });
+            buf.extend_from_slice(if current.application_keypad() {
+                b"\x1b="
+            } else {
+                b"\x1b>"
+            });
+            buf.extend_from_slice(if current.bracketed_paste() {
+                b"\x1b[?2004h"
+            } else {
+                b"\x1b[?2004l"
+            });
+            match current.mouse_protocol_mode() {
+                // vt100 normalises away the X10 `?9` mode, but still decode
+                // its enable on input: pushing the closest superset keeps the
+                // physical side reporting instead of silent. The disable side
+                // below clears every known mode, so a stale superset can
+                // never survive a child that turns reporting off.
+                vt100::MouseProtocolMode::Press | vt100::MouseProtocolMode::PressRelease => {
+                    buf.extend_from_slice(b"\x1b[?1000h");
+                }
+                vt100::MouseProtocolMode::ButtonMotion => {
+                    buf.extend_from_slice(b"\x1b[?1002h");
+                }
+                vt100::MouseProtocolMode::AnyMotion => {
+                    buf.extend_from_slice(b"\x1b[?1003h");
+                }
+                vt100::MouseProtocolMode::None => {
+                    buf.extend_from_slice(b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?9l");
+                }
+            }
+            match current.mouse_protocol_encoding() {
+                vt100::MouseProtocolEncoding::Utf8 => buf.extend_from_slice(b"\x1b[?1005h"),
+                vt100::MouseProtocolEncoding::Sgr => buf.extend_from_slice(b"\x1b[?1006h"),
+                vt100::MouseProtocolEncoding::Default => {
+                    buf.extend_from_slice(b"\x1b[?1006l\x1b[?1005l");
+                }
+            }
+            // Same for cursor visibility: `state_formatted` only records
+            // *transitions*, but a fresh physical screen always starts
+            // visible — which may disagree with the child (vim hides it).
+            buf.extend_from_slice(if current.hide_cursor() {
+                b"\x1b[?25l"
+            } else {
+                b"\x1b[?25h"
+            });
+        }
+        Some(prev_screen) => {
+            if current.application_cursor() != prev_screen.application_cursor() {
+                buf.extend_from_slice(if current.application_cursor() {
+                    b"\x1b[?1h"
+                } else {
+                    b"\x1b[?1l"
+                });
+            }
+            if current.application_keypad() != prev_screen.application_keypad() {
+                buf.extend_from_slice(if current.application_keypad() {
+                    b"\x1b="
+                } else {
+                    b"\x1b>"
+                });
+            }
+            if current.bracketed_paste() != prev_screen.bracketed_paste() {
+                buf.extend_from_slice(if current.bracketed_paste() {
+                    b"\x1b[?2004h"
+                } else {
+                    b"\x1b[?2004l"
+                });
+            }
+            // Mouse mode is a single enum on the wire: any change re-pushes
+            // the new mode. Disabling restores `None` by clearing every mode
+            // the physical terminal might still hold from an earlier state.
+            // Mouse encoding likewise only emits transitions.
+            if current.mouse_protocol_mode() != prev_screen.mouse_protocol_mode() {
+                match current.mouse_protocol_mode() {
+                    vt100::MouseProtocolMode::Press | vt100::MouseProtocolMode::PressRelease => {
+                        buf.extend_from_slice(b"\x1b[?1000h");
+                    }
+                    vt100::MouseProtocolMode::ButtonMotion => {
+                        buf.extend_from_slice(b"\x1b[?1002h");
+                    }
+                    vt100::MouseProtocolMode::AnyMotion => {
+                        buf.extend_from_slice(b"\x1b[?1003h");
+                    }
+                    vt100::MouseProtocolMode::None => {
+                        buf.extend_from_slice(b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?9l");
+                    }
+                }
+            }
+            if current.mouse_protocol_encoding() != prev_screen.mouse_protocol_encoding() {
+                match current.mouse_protocol_encoding() {
+                    vt100::MouseProtocolEncoding::Utf8 => {
+                        buf.extend_from_slice(b"\x1b[?1005h");
+                    }
+                    vt100::MouseProtocolEncoding::Sgr => {
+                        buf.extend_from_slice(b"\x1b[?1006h");
+                    }
+                    vt100::MouseProtocolEncoding::Default => {
+                        buf.extend_from_slice(b"\x1b[?1006l\x1b[?1005l");
+                    }
+                }
+            }
+            if current.hide_cursor() != prev_screen.hide_cursor() {
+                buf.extend_from_slice(if current.hide_cursor() {
+                    b"\x1b[?25l"
+                } else {
+                    b"\x1b[?25h"
+                });
+            }
+        }
+    }
+    buf
+}
+
+/// Restore the input modes the TUI itself expects after leaving raw TTY.
+///
+/// Inverse of [`tty_input_mode_bytes`]'s full-repaint side: the TUI enables
+/// bracketed paste once at startup and never touches application cursor /
+/// keypad / mouse reporting, so on exit force exactly that state. Any child
+/// that left mouse reporting, application cursor, or `DECSET 2004`-off
+/// behind would otherwise keep corrupting the outer terminal — arrow keys or
+/// mouse events would arrive in the wrong encoding after the TTY closed.
+///
+/// Like `reset_tui_attributes`, best-effort: never fails the transition.
+fn restore_tui_input_modes<W: Write>(out: &mut CrosstermBackend<W>) -> std::io::Result<()> {
+    let _ = out.write_all(b"\x1b[?1l\x1b>\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?9l\x1b[?1006l\x1b[?1005l\x1b[?2004h\x1b[?25h");
+    Ok(())
+}
+
 /// Prepare the physical terminal for raw passthrough of a child's vt100
 /// screen.
 ///
@@ -77,12 +250,15 @@ fn reset_tui_attributes<W: Write>(out: &mut CrosstermBackend<W>) -> std::io::Res
 ///   `draw()` after leaving the TTY would emit only a *diff* against that
 ///   stale frame and leftover TTY rows would survive on screen. `clear()`
 ///   also resets the back buffer so the next TUI draw is a full repaint.
-/// - `tty_output`'s diff cache (`prev_screen`) describes what is *currently
+/// - `tty_frame`'s diff cache (`prev_screen`) describes what is *currently
 ///   on the physical screen (the TUI). Keeping it would make the first diff
 ///   render TTY content *relative to the TUI screen* — garbage rows. Dropping
 ///   it forces a full `state_formatted` repaint.
-/// - SGR/cursor state the TUI left behind (hidden cursor, attributes) would
-///   bleed into the child's output; reset them first on a real terminal.
+/// - SGR/cursor/input-mode state the TUI left behind (hidden cursor,
+///   attributes, bracketed paste) would bleed into the child's output; reset
+///   them first on a real terminal, then push the child's own modes before
+///   the first content bytes so the opening frame is already interpreted
+///   with the right settings.
 ///
 /// The `B: Backend` generic keeps this unit-testable with `TestBackend`;
 /// [`enter_tty_real`] adds the raw crossterm writes used in production.
@@ -117,9 +293,18 @@ pub fn enter_tty_real<W: Write>(
     wipe_real(terminal)?;
     execute!(terminal.backend_mut(), Clear(ClearType::All))?;
     // Paint the first TTY frame *now* instead of waiting for the next render
-    // tick: `tty_output` drops the stale cache (None -> full repaint) and
-    // emits the complete screen in this same synchronized update.
-    if let Some(output) = tty_output(proc) {
+    // tick: `tty_frame` drops the stale cache (None -> full repaint) and
+    // emits the complete screen in this same synchronized update. The input
+    // modes are pushed *before* the content so a full-screen child never
+    // renders one frame with the TUI's modes.
+    if let Some((output, modes)) = tty_frame(proc) {
+        // `modes` is empty on an unchanged steady-state tick; `tty_frame`
+        // returns `None` there so `enter` never emits a bare mode sequence
+        // without content. On a full repaint it carries the child's modes
+        // (best-effort: a lost mode sequence heals on the next repaint).
+        if !modes.is_empty() {
+            let _ = terminal.backend_mut().write_all(&modes);
+        }
         terminal.backend_mut().write_all(&output)?;
     }
     execute!(terminal.backend_mut(), EndSynchronizedUpdate)?;
@@ -176,6 +361,7 @@ pub fn exit_tty_real<W: Write>(
     execute!(terminal.backend_mut(), BeginSynchronizedUpdate)?;
     *proc.prev_screen.lock() = None;
     reset_tui_attributes(terminal.backend_mut())?;
+    restore_tui_input_modes(terminal.backend_mut())?;
     wipe_real(terminal)?;
     execute!(terminal.backend_mut(), Clear(ClearType::All))?;
     execute!(terminal.backend_mut(), EndSynchronizedUpdate)?;
@@ -214,6 +400,7 @@ pub fn exit_temp_tty_real<W: Write>(
     execute!(terminal.backend_mut(), BeginSynchronizedUpdate)?;
     *prev_screen.lock() = None;
     reset_tui_attributes(terminal.backend_mut())?;
+    restore_tui_input_modes(terminal.backend_mut())?;
     wipe_real(terminal)?;
     execute!(terminal.backend_mut(), Clear(ClearType::All))?;
     execute!(terminal.backend_mut(), EndSynchronizedUpdate)?;
@@ -315,12 +502,7 @@ fn render_normal<B: Backend>(
             let reason = crate::process::exit_reason(proc).unwrap_or_else(|| "failed".to_string());
             let tail = {
                 let log = proc.log_buffer.lock();
-                crate::process::log_tail_lines(
-                    &log,
-                    rows,
-                    cols,
-                    crate::process::LOG_TAIL_LINES,
-                )
+                crate::process::log_tail_lines(&log, rows, cols, crate::process::LOG_TAIL_LINES)
             };
             (reason, tail)
         });
@@ -541,24 +723,83 @@ fn render_prompt<B: Backend>(
     Ok(())
 }
 
+/// Content-only projection of [`tty_frame`] (drops the mode half).
+///
+/// Kept for the unit-test seam: production (`render_tty`/`enter_tty_real`)
+/// uses `tty_frame` directly so modes ride with content.
+#[cfg(test)]
 pub(crate) fn tty_output(proc: &Process) -> Option<Vec<u8>> {
+    tty_frame(proc).map(|(output, _)| output)
+}
+
+/// Full TTY frame as `(content, input_modes)`.
+///
+/// `content` is the vt100 `state_diff` (or `state_formatted` when the cache
+/// is empty or the geometry changed); `input_modes` carries the physical
+/// terminal mode transitions (`tty_input_mode_bytes`) for the same
+/// prev→current pair. Both halves share one `prev` snapshot, so modes and
+/// content can never disagree about which state they describe — e.g. an
+/// app-cursor enable can never be paired with a diff computed against the
+/// wrong baseline.
+///
+/// Edge cases handled explicitly (each previously produced visible breakage):
+/// - empty `state_diff` *with* a mode change (a child toggling bracketed
+///   paste / mouse / app-cursor without touching any cell): returns `Some`
+///   with empty content and non-empty modes, so `render_tty` still pushes
+///   the mode switch instead of dropping it as a no-op;
+/// - fully empty frame (no content, no mode change): returns `None`, so the
+///   50ms tick skips the write syscall entirely;
+/// - geometry change: full `state_formatted` repaint, and the mode half is
+///   computed with `prev=None` so *all* modes are re-pushed (the physical
+///   screen was cleared underneath, so differential modes would be wrong).
+/// - alternate-screen transitions (`vim` enter/exit, `less`, `lazygit`):
+///   treated as a full repaint even at identical geometry. vt100's diff
+///   only compares the *active* grid, so without this a normal→alt switch
+///   diffs the alt grid against the stale normal grid and vice versa —
+///   leftover rows from the other stack leak through. The mode half is again
+///   `prev=None` (full re-push), keeping cursor-visibility/mouse state exact
+///   across the switch.
+fn tty_frame(proc: &Process) -> Option<(Vec<u8>, Vec<u8>)> {
+    // Lock order is always `parser` → `prev_screen` (same as
+    // `resize_parsers`): never invert it, or the PTY reader thread can
+    // deadlock against the render tick.
     let parser = proc.parser.lock();
     let screen = parser.screen();
     let mut prev = proc.prev_screen.lock();
-    let bytes = if let Some(prev_screen) = prev.as_ref() {
-        if prev_screen.size() == screen.size() {
-            screen.state_diff(prev_screen)
-        } else {
-            screen.state_formatted()
+    let full_repaint = match prev.as_ref() {
+        None => true,
+        Some(prev_screen) => {
+            prev_screen.size() != screen.size()
+                || prev_screen.alternate_screen() != screen.alternate_screen()
         }
-    } else {
-        screen.state_formatted()
     };
-    if bytes.is_empty() {
+    // `bytes`/`modes` are owned, so the immutable `prev` borrow ends before
+    // the `*prev = ...` assignment below (no clone of the cached screen on
+    // the hot path — the idle 50ms tick does zero screen-sized allocations).
+    let bytes = if full_repaint {
+        screen.state_formatted()
+    } else {
+        // `prev` is `Some` here (checked above).
+        match prev.as_ref() {
+            Some(prev_screen) => screen.state_diff(prev_screen),
+            None => screen.state_formatted(),
+        }
+    };
+    // Modes always track the *real* previous frame for a diff, but a full
+    // repaint cleared the physical screen — re-push everything.
+    let modes = if full_repaint {
+        tty_input_mode_bytes(screen, None)
+    } else {
+        match prev.as_ref() {
+            Some(prev_screen) => tty_input_mode_bytes(screen, Some(prev_screen)),
+            None => tty_input_mode_bytes(screen, None),
+        }
+    };
+    if bytes.is_empty() && modes.is_empty() {
         return None;
     }
     *prev = Some(screen.clone());
-    Some(bytes)
+    Some((bytes, modes))
 }
 
 /// Invalidate the vt100 diff cache without emitting anything. Call when the
@@ -576,10 +817,13 @@ fn render_tty<W: Write>(
     _rows: u16,
     _cols: u16,
 ) -> std::io::Result<()> {
-    // Skip the write syscall entirely when nothing changed: `tty_output`
-    // returns None for an empty diff, and a lone `flush()` per 50ms tick on
-    // an idle TTY would still wake the terminal driver for nothing.
-    let Some(output) = tty_output(proc) else {
+    // Skip the write syscall entirely when nothing changed: `tty_frame`
+    // returns None for an empty diff *with no mode change*, and a lone
+    // `flush()` per 50ms tick on an idle TTY would still wake the terminal
+    // driver for nothing. A mode-only frame (empty content, non-empty modes)
+    // must still be pushed — otherwise a child toggling bracketed-paste or
+    // mouse reporting without touching a cell would never take effect.
+    let Some((output, modes)) = tty_frame(proc) else {
         return Ok(());
     };
     let stdout = terminal.backend_mut();
@@ -587,7 +831,11 @@ fn render_tty<W: Write>(
     // wrapped by enter_tty/exit_tty framing, and nesting synchronized-update
     // scopes produces flicker on terminals that stack them. Per-tick diffs
     // are small cursor-addressed writes; flushing once keeps them atomic
-    // enough without an extra scope per 50ms tick.
+    // enough without an extra scope per 50ms tick. Modes go first so the
+    // content that follows is interpreted with the right settings.
+    if !modes.is_empty() {
+        let _ = stdout.write_all(&modes);
+    }
     stdout.write_all(&output)?;
     std::io::Write::flush(stdout)?;
     Ok(())
@@ -678,6 +926,13 @@ mod tests {
         Arc,
         atomic::{AtomicBool, AtomicU8, AtomicU64},
     };
+
+    /// Build a `Process` with `bytes` fed through its vt100 parser, at the
+    /// given geometry with a zero scrollback.
+    ///
+    /// NOTE: the alternate-screen flag is grid-independent in vt100, so a
+    /// parser built with `Parser::new` always starts on the normal screen —
+    /// use [`make_alt_proc`] for alternate-screen cases.
     fn make_proc_with_content(content: &[u8], rows: u16, cols: u16) -> Process {
         let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 0)));
         parser.lock().process(content);
@@ -705,6 +960,16 @@ mod tests {
             exit_signal: Arc::new(Mutex::new(None)),
             log_buffer: Arc::new(Mutex::new(content.to_vec())),
         }
+    }
+
+    /// Build a `Process` with `bytes` fed through its vt100 parser, with an
+    /// alternate-screen app active (as `vim`/`less` leave it). `content` is
+    /// processed *after* the switch so it lands on the alternate grid.
+    fn make_alt_proc(content: &[u8], rows: u16, cols: u16) -> Process {
+        let proc = make_proc_with_content(b"", rows, cols);
+        proc.parser.lock().process(b"\x1b[?1049h");
+        proc.parser.lock().process(content);
+        proc
     }
 
     /// True when `bytes` are a full vt100 screen repaint (home + erase-all
@@ -1218,5 +1483,157 @@ mod tests {
             .map(|(x, y)| terminal.backend().buffer()[(x, y)].symbol().to_string())
             .collect();
         assert!(repainted.contains("Multistack"));
+    }
+
+    // ---- TTY input-mode + alternate-screen edge cases ----
+    //
+    // A full-screen child (vim/less/lazygit) toggles physical-terminal modes
+    // the TUI itself never touches. The child only talks to our vt100 parser,
+    // so `tty_frame` must mirror those modes onto the real terminal — and
+    // undo them on exit — or arrow keys/mouse/paste/cursor visibly break.
+
+    #[test]
+    fn test_tty_frame_carries_modes_on_full_repaint() {
+        // `vim`-style entry: app cursor + hidden cursor, no cell touched.
+        let proc = make_proc_with_content(b"\x1b[?1h\x1b[?25l", 10, 20);
+        let (content, modes) = tty_frame(&proc).expect("full repaint frame");
+        assert!(is_full_repaint(&content));
+        assert!(
+            modes.windows(5).any(|w| w == b"\x1b[?1h"),
+            "app-cursor enable missing: {modes:?}"
+        );
+        assert!(
+            modes.windows(6).any(|w| w == b"\x1b[?25l"),
+            "hide-cursor missing: {modes:?}"
+        );
+    }
+
+    /// Subsequence search over raw mode bytes (avoids hand-counting escape
+    /// lengths in every assertion below).
+    fn modes_contain(modes: &[u8], seq: &[u8]) -> bool {
+        seq.is_empty() || modes.windows(seq.len()).any(|w| w == seq)
+    }
+
+    #[test]
+    fn test_tty_frame_mode_only_change_still_emits() {
+        // Steady state first (content + modes flushed, cache populated).
+        let proc = make_proc_with_content(b"shell$ ", 10, 20);
+        let _ = tty_frame(&proc).expect("initial frame");
+        assert!(tty_frame(&proc).is_none(), "idle tick must stay silent");
+        // Child enables app-cursor without touching any cell: the content
+        // diff may or may not be empty depending on vt100 internals, but the
+        // mode switch must go out either way.
+        proc.parser.lock().process(b"\x1b[?1h");
+        let (_, modes) = tty_frame(&proc).expect("mode-only frame");
+        assert!(
+            modes_contain(&modes, b"\x1b[?1h"),
+            "app-cursor enable dropped: {modes:?}"
+        );
+        // And steady state is silent again afterwards.
+        assert!(tty_frame(&proc).is_none());
+    }
+
+    #[test]
+    fn test_tty_frame_mode_diff_tracks_previous() {
+        // App cursor on, flushed; then off again: the second frame must carry
+        // the *disable*, not re-emit the enable.
+        let proc = make_proc_with_content(b"\x1b[?1h", 10, 20);
+        let (_, first_modes) = tty_frame(&proc).expect("initial frame");
+        assert!(modes_contain(&first_modes, b"\x1b[?1h"));
+        proc.parser.lock().process(b"\x1b[?1l");
+        let (content, modes) = tty_frame(&proc).expect("mode-off frame");
+        assert!(
+            modes_contain(&modes, b"\x1b[?1l"),
+            "app-cursor disable missing: content={content:?} modes={modes:?}"
+        );
+        assert!(
+            !modes_contain(&modes, b"\x1b[?1h"),
+            "stale enable must not repeat: {modes:?}"
+        );
+    }
+
+    #[test]
+    fn test_tty_frame_mouse_enable_and_disable() {
+        let proc = make_proc_with_content(b"\x1b[?1000h", 10, 20);
+        let (_, modes) = tty_frame(&proc).expect("mouse-on frame");
+        assert!(
+            modes_contain(&modes, b"\x1b[?1000h"),
+            "mouse enable missing: {modes:?}"
+        );
+        proc.parser.lock().process(b"\x1b[?1000l");
+        let (_, modes) = tty_frame(&proc).expect("mouse-off frame");
+        // Disabling clears every known mouse mode so no stale superset (e.g.
+        // an earlier `1002h`) can survive with a wrong encoding.
+        for seq in [b"\x1b[?1000l".as_slice(), b"\x1b[?1002l", b"\x1b[?1003l"] {
+            assert!(
+                modes_contain(&modes, seq),
+                "mouse disable incomplete ({seq:?}): {modes:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_tty_frame_alternate_screen_forces_full_repaint() {
+        // Normal screen with content, steady state reached.
+        let proc = make_proc_with_content(b"shell output", 10, 20);
+        let _ = tty_frame(&proc).expect("initial frame");
+        assert!(tty_frame(&proc).is_none());
+        // Child enters the alternate screen (`vim`): same geometry, but the
+        // visible stack changed — must be a full repaint, never a diff of
+        // the alt grid against the stale normal grid.
+        proc.parser.lock().process(b"\x1b[?1049hvim screen");
+        assert!(proc.parser.lock().screen().alternate_screen());
+        let (content, _) = tty_frame(&proc).expect("alt-enter frame");
+        assert!(is_full_repaint(&content));
+        assert!(content.windows(10).any(|w| w == b"vim screen"));
+        // Steady on the alternate screen stays silent...
+        assert!(tty_frame(&proc).is_none());
+        // ...and leaving it (`:q`) is a full repaint back, not a diff.
+        proc.parser.lock().process(b"\x1b[?1049l");
+        assert!(!proc.parser.lock().screen().alternate_screen());
+        let (content, _) = tty_frame(&proc).expect("alt-exit frame");
+        assert!(is_full_repaint(&content));
+        assert!(content.windows(12).any(|w| w == b"shell output"));
+    }
+
+    #[test]
+    fn test_tty_input_mode_bytes_full_repaint_disables_stale_modes() {
+        // Child never asked for mouse: a full repaint must still *disable*
+        // it, or a stale `ESC[?1000h` left by a previous child survives.
+        let proc = make_proc_with_content(b"plain shell", 10, 20);
+        let screen = proc.parser.lock().screen().clone();
+        let modes = tty_input_mode_bytes(&screen, None);
+        assert!(
+            modes_contain(&modes, b"\x1b[?1000l"),
+            "full repaint must clear mouse: {modes:?}"
+        );
+        assert!(
+            modes_contain(&modes, b"\x1b[?2004l") || modes_contain(&modes, b"\x1b[?2004h"),
+            "full repaint must pin bracketed paste: {modes:?}"
+        );
+        // Diff side stays quiet when nothing changed.
+        let same = tty_input_mode_bytes(&screen, Some(&screen));
+        assert!(same.is_empty(), "no mode change must emit nothing");
+    }
+
+    #[test]
+    fn test_tty_frame_content_and_modes_share_one_baseline() {
+        // Cell change + mode change in the same tick: both halves describe
+        // the same prev→current transition (single cache snapshot).
+        let proc = make_proc_with_content(b"a", 10, 20);
+        let _ = tty_frame(&proc).expect("initial frame");
+        proc.parser.lock().process(b"\x1b[?1hb");
+        let (content, modes) = tty_frame(&proc).expect("mixed frame");
+        assert!(!content.is_empty());
+        assert!(modes_contain(&modes, b"\x1b[?1h"));
+        assert!(tty_frame(&proc).is_none());
+    }
+
+    #[test]
+    fn test_make_alt_proc_helper_marks_alternate() {
+        let proc = make_alt_proc(b"alt content", 10, 20);
+        assert!(proc.parser.lock().screen().alternate_screen());
+        let (content, _) = tty_frame(&proc).expect("alt frame");
+        assert!(content.windows(11).any(|w| w == b"alt content"));
     }
 }
