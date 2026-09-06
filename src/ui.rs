@@ -767,7 +767,7 @@ fn render_quit_overlay(
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
         Span::styled(
-            "q / Enter".to_string(),
+            "Enter".to_string(),
             Style::default().add_modifier(Modifier::BOLD),
         ),
         Span::raw(" quit   ".to_string()),
@@ -946,7 +946,7 @@ fn render_normal<B: Backend>(
         }
 
         let help = if confirm_quit {
-            Line::from("q/Enter: quit   Esc: stay")
+            Line::from("Enter: quit   Esc: stay")
         } else if no_worktree {
             if cols < 40 {
                 Line::from("m:bare r:ren d:kill ?:help q:quit")

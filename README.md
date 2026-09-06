@@ -59,7 +59,7 @@ You need [zerostack](https://gi-dellav.github.io/zerostack/) on your PATH, plus 
 | `↑` / `↓` | Move selection |
 | `PageUp` / `PageDown` | Jump to previous / next project header |
 | `?` / `F1` | Scrollable help overlay (keybindings, statuses, tips) |
-| `q` | Quit — shows confirmation with agent counts (`q`/`Enter` quits, `Esc`/`n` stays) |
+| `q` | Quit — shows confirmation with agent counts (`Enter` quits, `Esc`/`n` stays) |
 | `Esc` | Quit (confirmation; git conflicts get a warning) |
 
 ### TTY view (agent / lazygit / shell)

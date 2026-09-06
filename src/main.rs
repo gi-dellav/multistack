@@ -11,7 +11,6 @@ mod ui;
 
 use std::io::stdout;
 use std::path::Path;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use clap::Parser;
@@ -34,7 +33,6 @@ use input::process_event;
 use persistence::load_project_dirs;
 use process::{Process, check_tty_alive, sync_statuses};
 use project::{Project, build_entries};
-use status::STATUS_GIT_CONFLICT;
 #[cfg(feature = "attach")]
 use ui::force_full_repaint;
 use ui::{enter_tty_real, exit_temp_tty_real, exit_tty_real, render, wipe_real};
@@ -237,7 +235,6 @@ async fn run_server(cli: Cli) -> std::io::Result<()> {
     let mut term_cols = cols;
 
     let mut reader = EventStream::new();
-    let mut suppress_quit = false;
     let mut confirm_quit = false;
     let mut show_help = false;
     let mut help_scroll: u16 = 0;
@@ -246,8 +243,6 @@ async fn run_server(cli: Cli) -> std::io::Result<()> {
     render_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
-        let was_tty = matches!(mode, Mode::Tty { .. } | Mode::TempTty { .. });
-
         if let Some(restore_selected) = check_tty_alive(&mode, &mut processes) {
             // The child died while we were showing its raw output: the
             // physical screen still holds TTY content. Restore TUI ownership
@@ -272,9 +267,6 @@ async fn run_server(cli: Cli) -> std::io::Result<()> {
             mode = Mode::Normal {
                 selected: restore_selected,
             };
-            if was_tty {
-                suppress_quit = true;
-            }
             execute!(
                 terminal.backend_mut(),
                 SetAttribute(Attribute::Reset),
@@ -351,7 +343,6 @@ async fn run_server(cli: Cli) -> std::io::Result<()> {
                     &mut term_cols,
                     cli.dont_save,
                     cli.no_worktree,
-                    &mut suppress_quit,
                     &mut confirm_quit,
                     &mut show_help,
                     &mut help_scroll,
@@ -379,7 +370,6 @@ async fn run_server(cli: Cli) -> std::io::Result<()> {
                             &mut term_cols,
                             cli.dont_save,
                             cli.no_worktree,
-                            &mut suppress_quit,
                             &mut confirm_quit,
                             &mut show_help,
                             &mut help_scroll,
@@ -455,7 +445,6 @@ fn dispatch_event<W: std::io::Write>(
     term_cols: &mut u16,
     dont_save: bool,
     no_worktree: bool,
-    suppress_quit: &mut bool,
     confirm_quit: &mut bool,
     show_help: &mut bool,
     help_scroll: &mut u16,
@@ -510,21 +499,18 @@ fn dispatch_event<W: std::io::Write>(
         return Ok(false);
     }
 
-    // Quit confirmation is modal too: only explicit quit/stay keys count,
-    // everything else keeps the popup on screen.
+    // Quit confirmation is modal too: only Enter quits, Esc/n stay.
+    // Every other key (including `q`) is swallowed and keeps the popup
+    // on screen.
     if *confirm_quit {
         use crossterm::event::{Event as CEvent, KeyCode};
         if let CEvent::Key(key) = &event {
             match key.code {
+                KeyCode::Enter => {
+                    return Ok(true);
+                }
                 KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
                     *confirm_quit = false;
-                }
-                KeyCode::Char('q')
-                | KeyCode::Char('Q')
-                | KeyCode::Char('y')
-                | KeyCode::Char('Y')
-                | KeyCode::Enter => {
-                    return Ok(true);
                 }
                 _ => {
                     // Swallow: keep the popup visible instead of dismissing
@@ -623,7 +609,6 @@ fn dispatch_event<W: std::io::Write>(
     }
 
     if was_tty_before_event && matches!(mode, Mode::Normal { .. }) {
-        *suppress_quit = true;
         *confirm_quit = false;
         // Leaving raw mode: the physical screen holds TTY content and the
         // vt100 cache describes it. Either must be discarded before the TUI
@@ -665,29 +650,15 @@ fn dispatch_event<W: std::io::Write>(
     }
 
     if should_quit {
-        if *suppress_quit {
-            *suppress_quit = false;
-            *confirm_quit = true;
-            let entries = build_entries(projects, processes);
-            render(
-                terminal,
-                mode,
-                &entries,
-                projects,
-                processes,
-                *term_rows,
-                *term_cols,
-                *confirm_quit,
-                no_worktree,
-                *show_help,
-                *help_scroll,
-            )?;
-            return Ok(false);
-        }
-        let has_git_conflict = processes
-            .iter()
-            .any(|p| p.status.load(Ordering::SeqCst) == STATUS_GIT_CONFLICT);
-        if has_git_conflict && !*confirm_quit {
+        // Quitting is always two-step: the first `q`/`Esc` raises the
+        // confirmation popup (with live agent counts) and the modal branch
+        // at the top of this function resolves the follow-up keypress
+        // (only `Enter` quits, only `Esc`/`n` stay; `q` does nothing).
+        // Previously only a
+        // post-TTY quit or a git-conflict quit was confirmed, so a plain
+        // `q` returned `Ok(true)` here immediately and the popup never
+        // appeared.
+        if !*confirm_quit {
             *confirm_quit = true;
             let entries = build_entries(projects, processes);
             render(
@@ -708,10 +679,6 @@ fn dispatch_event<W: std::io::Write>(
         return Ok(true);
     }
 
-    if matches!(mode, Mode::Normal { .. }) {
-        *suppress_quit = false;
-        *confirm_quit = false;
-    }
     let entries = build_entries(projects, processes);
     if let Mode::Normal { selected } = mode {
         if entries.is_empty() {
@@ -753,4 +720,189 @@ fn restore_terminal<W: std::io::Write>(
         terminal::LeaveAlternateScreen
     );
     let _ = disable_raw_mode();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+    fn key(code: KeyCode) -> Event {
+        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn harness() -> (
+        Mode,
+        Vec<Project>,
+        usize,
+        Vec<Process>,
+        usize,
+        NativePtySystem,
+        Terminal<CrosstermBackend<Vec<u8>>>,
+        u16,
+        u16,
+        bool,
+        bool,
+        u16,
+    ) {
+        // Fixed viewport: `Terminal::new` queries the *real* terminal size
+        // via ioctl, which fails headless (WouldBlock). A fixed area never
+        // touches the OS terminal.
+        let backend = CrosstermBackend::new(Vec::new());
+        let area = ratatui::layout::Rect::new(0, 0, 80, 24);
+        let options = ratatui::TerminalOptions {
+            viewport: ratatui::Viewport::Fixed(area),
+        };
+        let terminal = Terminal::with_options(backend, options).unwrap();
+        let projects = vec![Project {
+            id: 1,
+            name: "proj".into(),
+            directory: "/tmp".into(),
+        }];
+        (
+            Mode::Normal { selected: 0 },
+            projects,
+            2,
+            Vec::new(),
+            1,
+            NativePtySystem::default(),
+            terminal,
+            24,
+            80,
+            false,
+            false,
+            0,
+        )
+    }
+
+    #[test]
+    fn test_quit_is_two_step_with_popup() {
+        let (
+            mut mode,
+            mut projects,
+            mut next_project_id,
+            mut processes,
+            mut next_id,
+            pty_system,
+            mut terminal,
+            mut rows,
+            mut cols,
+            mut confirm_quit,
+            mut show_help,
+            mut help_scroll,
+        ) = harness();
+        // First `q`: no quit, confirmation popup raised.
+        let quit = dispatch_event(
+            key(KeyCode::Char('q')),
+            &mut mode,
+            &mut projects,
+            &mut next_project_id,
+            &mut processes,
+            &mut next_id,
+            &pty_system,
+            &mut terminal,
+            &mut rows,
+            &mut cols,
+            true,
+            false,
+            &mut confirm_quit,
+            &mut show_help,
+            &mut help_scroll,
+        )
+        .unwrap();
+        assert!(!quit);
+        assert!(confirm_quit);
+        // `q` is inert while confirming: no quit, popup stays up.
+        let quit = dispatch_event(
+            key(KeyCode::Char('q')),
+            &mut mode,
+            &mut projects,
+            &mut next_project_id,
+            &mut processes,
+            &mut next_id,
+            &pty_system,
+            &mut terminal,
+            &mut rows,
+            &mut cols,
+            true,
+            false,
+            &mut confirm_quit,
+            &mut show_help,
+            &mut help_scroll,
+        )
+        .unwrap();
+        assert!(!quit);
+        assert!(confirm_quit);
+        let quit = dispatch_event(
+            key(KeyCode::Enter),
+            &mut mode,
+            &mut projects,
+            &mut next_project_id,
+            &mut processes,
+            &mut next_id,
+            &pty_system,
+            &mut terminal,
+            &mut rows,
+            &mut cols,
+            true,
+            false,
+            &mut confirm_quit,
+            &mut show_help,
+            &mut help_scroll,
+        )
+        .unwrap();
+        assert!(quit);
+    }
+
+    #[test]
+    fn test_quit_confirm_then_cancel_and_enter() {
+        let (
+            mut mode,
+            mut projects,
+            mut next_project_id,
+            mut processes,
+            mut next_id,
+            pty_system,
+            mut terminal,
+            mut rows,
+            mut cols,
+            mut confirm_quit,
+            mut show_help,
+            mut help_scroll,
+        ) = harness();
+        macro_rules! dispatch {
+            ($event:expr) => {
+                dispatch_event(
+                    $event,
+                    &mut mode,
+                    &mut projects,
+                    &mut next_project_id,
+                    &mut processes,
+                    &mut next_id,
+                    &pty_system,
+                    &mut terminal,
+                    &mut rows,
+                    &mut cols,
+                    true,
+                    false,
+                    &mut confirm_quit,
+                    &mut show_help,
+                    &mut help_scroll,
+                )
+                .unwrap()
+            };
+        }
+        assert!(!dispatch!(key(KeyCode::Char('q'))));
+        assert!(confirm_quit);
+        // Unrelated keys keep the popup instead of dismissing it.
+        assert!(!dispatch!(key(KeyCode::Up)));
+        assert!(confirm_quit);
+        // Esc cancels.
+        assert!(!dispatch!(key(KeyCode::Esc)));
+        assert!(!confirm_quit);
+        // `q` then `Enter` quits.
+        assert!(!dispatch!(key(KeyCode::Char('q'))));
+        assert!(dispatch!(key(KeyCode::Enter)));
+    }
 }
