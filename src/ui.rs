@@ -421,6 +421,7 @@ pub fn render<W: Write>(
     no_worktree: bool,
     activity_dot_enabled: bool,
     show_help: bool,
+    help_page: HelpPage,
     help_scroll: u16,
 ) -> std::io::Result<()> {
     match mode {
@@ -436,6 +437,7 @@ pub fn render<W: Write>(
             no_worktree,
             activity_dot_enabled,
             show_help,
+            help_page,
             help_scroll,
         ),
         Mode::Prompt {
@@ -453,6 +455,7 @@ pub fn render<W: Write>(
             rows,
             cols,
             show_help,
+            help_page,
             help_scroll,
             no_worktree,
             activity_dot_enabled,
@@ -471,6 +474,7 @@ pub fn render<W: Write>(
             rows,
             cols,
             show_help,
+            help_page,
             help_scroll,
             no_worktree,
         ),
@@ -505,6 +509,62 @@ fn key_line(keys: &str, desc: &str) -> Line<'static> {
         ),
         Span::raw(desc.to_string()),
     ])
+}
+
+/// Which page of the help overlay is visible. `Welcome` (1/2) is the
+/// first-launch quickstart, `Help` (2/2) is the full keybinding reference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HelpPage {
+    Welcome,
+    #[default]
+    Help,
+}
+
+/// First-launch quickstart shown as page (1/2) of the help overlay. Kept as
+/// data (not widgets) like `help_content` so tests can inspect it.
+pub fn welcome_content(no_worktree: bool) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::from(Span::styled(
+            "Welcome to Multistack — parallel zerostack agents".to_string(),
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            "Press Esc to start  •  ↑↓ / j k to scroll  •  → for full help (2/2)".to_string(),
+            Style::default().add_modifier(Modifier::DIM),
+        )),
+        Line::from(""),
+        section_header("WHAT IS THIS?"),
+        Line::from("  Multistack runs multiple zerostack agents side by side,"),
+        Line::from("  each in its own terminal with live status + timers."),
+        Line::from(""),
+        section_header("QUICKSTART"),
+        Line::from("  1. p — add the project directory (if not already listed)"),
+        Line::from("  2. n — spawn your first agent (names a git worktree)"),
+        Line::from("  3. Enter — drop into the agent, watch it work live"),
+        Line::from("  4. Esc — back to the list, d kills the selected agent"),
+        Line::from(""),
+        section_header("ESSENTIAL KEYS"),
+        key_line("n / N / m", "spawn agent (worktree / parallel / bare)"),
+        key_line("Enter", "drop into agent TTY (Esc returns to list)"),
+        key_line("d", "kill selected agent"),
+        key_line("?", "full keybinding reference (page 2/2)"),
+        key_line("q", "quit (asks for confirmation when needed)"),
+        Line::from(""),
+        section_header("AGENT STATUS"),
+        key_line("[ ] gray", "waiting — agent hasn't started yet"),
+        key_line("[~] yellow", "working — timer is running"),
+        key_line("[✓] green", "finished (stop signal received)"),
+    ];
+    if no_worktree {
+        lines.push(Line::from(
+            "  • Started with -w / --no-worktree: n spawns bare agents.",
+        ));
+    } else {
+        lines.push(Line::from(
+            "  • n creates a sibling worktree wt-<name>-… next to the project.",
+        ));
+    }
+    lines
 }
 
 /// Full help text shown in the `?` overlay. Kept as data (not widgets) so
@@ -611,19 +671,32 @@ pub fn help_content(no_worktree: bool) -> Vec<Line<'static>> {
     lines
 }
 
-fn render_help_overlay(frame: &mut ratatui::Frame, area: Rect, scroll: u16, no_worktree: bool) {
-    let content = help_content(no_worktree);
+fn render_help_overlay(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    page: HelpPage,
+    scroll: u16,
+    no_worktree: bool,
+) {
+    let content = match page {
+        HelpPage::Welcome => welcome_content(no_worktree),
+        HelpPage::Help => help_content(no_worktree),
+    };
     let popup = centered_rect(
         area,
         72.min(area.width.saturating_sub(2)),
         area.height.saturating_sub(2).max(10),
     );
     frame.render_widget(ratatui::widgets::Clear, popup);
+    let title = match page {
+        HelpPage::Welcome => " Welcome (1/2) ",
+        HelpPage::Help => " Help (2/2) ",
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan))
         .title(Span::styled(
-            " Help  (Esc closes) ",
+            title,
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
@@ -645,12 +718,16 @@ fn render_help_overlay(frame: &mut ratatui::Frame, area: Rect, scroll: u16, no_w
     frame.render_widget(para, body);
     let hint = if max_scroll == 0 {
         Line::from(Span::styled(
-            "Esc closes",
+            "←/→ pages • Esc closes",
             Style::default().add_modifier(Modifier::DIM),
         ))
     } else {
         Line::from(Span::styled(
-            format!("Esc closes • {}/{} ", scroll + 1, max_scroll + 1),
+            format!(
+                "←/→ pages • Esc closes • {}/{} ",
+                scroll + 1,
+                max_scroll + 1
+            ),
             Style::default().add_modifier(Modifier::DIM),
         ))
     };
@@ -833,6 +910,7 @@ fn render_normal<B: Backend>(
     no_worktree: bool,
     activity_dot_enabled: bool,
     show_help: bool,
+    help_page: HelpPage,
     help_scroll: u16,
 ) -> std::io::Result<()> {
     // Failure detail for the selected row: exit reason + log tail. Computed
@@ -979,7 +1057,7 @@ fn render_normal<B: Backend>(
             render_quit_overlay(frame, area, projects, processes);
         }
         if show_help {
-            render_help_overlay(frame, area, help_scroll, no_worktree);
+            render_help_overlay(frame, area, help_page, help_scroll, no_worktree);
         }
     }).map_err(|e| std::io::Error::other(format!("{e:?}")))?;
     Ok(())
@@ -997,6 +1075,7 @@ fn render_prompt<B: Backend>(
     _rows: u16,
     cols: u16,
     show_help: bool,
+    help_page: HelpPage,
     help_scroll: u16,
     no_worktree: bool,
     activity_dot_enabled: bool,
@@ -1072,7 +1151,7 @@ fn render_prompt<B: Backend>(
 
             if show_help {
                 let area = frame.area();
-                render_help_overlay(frame, area, help_scroll, no_worktree);
+                render_help_overlay(frame, area, help_page, help_scroll, no_worktree);
             }
         })
         .map_err(|e| std::io::Error::other(format!("{e:?}")))?;
@@ -1234,12 +1313,14 @@ pub fn force_full_repaint<B: Backend>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_dirpicker<B: Backend>(
     terminal: &mut Terminal<B>,
     explorer: &FileExplorer,
     _rows: u16,
     cols: u16,
     show_help: bool,
+    help_page: HelpPage,
     help_scroll: u16,
     no_worktree: bool,
 ) -> std::io::Result<()> {
@@ -1274,7 +1355,7 @@ fn render_dirpicker<B: Backend>(
 
         if show_help {
             let area = frame.area();
-            render_help_overlay(frame, area, help_scroll, no_worktree);
+            render_help_overlay(frame, area, help_page, help_scroll, no_worktree);
         }
     }).map_err(|e| std::io::Error::other(format!("{e:?}")))?;
     Ok(())
@@ -1458,6 +1539,7 @@ mod tests {
             false,
             true,
             false,
+            HelpPage::Help,
             0,
         );
         assert!(res.is_ok());
@@ -1472,6 +1554,7 @@ mod tests {
             24,
             80,
             false,
+            HelpPage::Help,
             0,
             false,
             true,
@@ -1600,6 +1683,7 @@ mod tests {
             false,
             true,
             false,
+            HelpPage::Help,
             0,
         )
         .unwrap();
@@ -1628,6 +1712,7 @@ mod tests {
             false,
             true,
             false,
+            HelpPage::Help,
             0,
         )
         .unwrap();
@@ -1746,6 +1831,7 @@ mod tests {
             false,
             true,
             false,
+            HelpPage::Help,
             0,
         )
         .unwrap();
@@ -1774,6 +1860,7 @@ mod tests {
             false,
             true,
             false,
+            HelpPage::Help,
             0,
         )
         .unwrap();
@@ -1823,6 +1910,7 @@ mod tests {
             false,
             true,
             false,
+            HelpPage::Help,
             0,
         )
         .unwrap();
@@ -1838,6 +1926,7 @@ mod tests {
             false,
             true,
             false,
+            HelpPage::Help,
             0,
         )
         .unwrap();
@@ -1867,6 +1956,7 @@ mod tests {
             false,
             true,
             false,
+            HelpPage::Help,
             0,
         )
         .unwrap();
@@ -2083,6 +2173,82 @@ mod tests {
     }
 
     #[test]
+    fn test_welcome_content_is_quickstart() {
+        for no_worktree in [false, true] {
+            let lines = welcome_content(no_worktree);
+            assert!(!lines.is_empty(), "welcome should have content");
+            let text: String = lines
+                .iter()
+                .map(|l| {
+                    l.spans
+                        .iter()
+                        .map(|s| s.content.to_string())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            for needle in ["QUICKSTART", "ESSENTIAL KEYS", "AGENT STATUS", "?"] {
+                assert!(text.contains(needle), "welcome missing {needle}");
+            }
+        }
+        // Welcome must point at the full help; help must not duplicate it.
+        let welcome: String = welcome_content(false)
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(welcome.contains("→") || welcome.contains("(2/2)"));
+    }
+
+    #[test]
+    fn test_help_pages_render_titles() {
+        use ratatui::backend::TestBackend;
+        fn screen_text(terminal: &Terminal<TestBackend>) -> String {
+            terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|c| c.symbol().to_string())
+                .collect()
+        }
+        for (page, title) in [(HelpPage::Welcome, "(1/2)"), (HelpPage::Help, "(2/2)")] {
+            let backend = TestBackend::new(80, 24);
+            let mut terminal = Terminal::new(backend).unwrap();
+            let projects = vec![crate::project::Project {
+                id: 1,
+                name: "proj".into(),
+                directory: "/tmp".into(),
+            }];
+            let proc = make_proc_with_content(b"", 24, 80);
+            let entries = crate::project::build_entries(&projects, std::slice::from_ref(&proc));
+            render_normal(
+                &mut terminal,
+                &entries,
+                &projects,
+                &[],
+                0,
+                24,
+                80,
+                false,
+                false,
+                true,
+                true,
+                page,
+                0,
+            )
+            .unwrap();
+            let screen = screen_text(&terminal);
+            assert!(screen.contains(title), "page {page:?} missing {title}");
+        }
+    }
+
+    #[test]
     fn test_process_item_unread_dot() {
         use std::sync::atomic::Ordering;
         fn screen_text(terminal: &Terminal<TestBackend>) -> String {
@@ -2119,6 +2285,7 @@ mod tests {
                 false,
                 dot_enabled,
                 false,
+                HelpPage::Help,
                 0,
             )
             .unwrap();
@@ -2163,6 +2330,7 @@ mod tests {
                 false,
                 true,
                 true,
+                HelpPage::Help,
                 scroll,
             );
             assert!(res.is_ok());
@@ -2180,6 +2348,7 @@ mod tests {
             false,
             true,
             false,
+            HelpPage::Help,
             0,
         );
         assert!(res.is_ok());
@@ -2198,6 +2367,7 @@ mod tests {
             false,
             true,
             true,
+            HelpPage::Help,
             100,
         );
         assert!(res.is_ok());

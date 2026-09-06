@@ -30,6 +30,7 @@ pub fn process_event(
     activity_dot_enabled: bool,
     confirm_quit: bool,
     show_help: &mut bool,
+    help_page: &mut crate::ui::HelpPage,
     help_scroll: &mut u16,
 ) -> std::io::Result<bool> {
     match event {
@@ -87,6 +88,7 @@ pub fn process_event(
                 activity_dot_enabled,
                 confirm_quit,
                 show_help,
+                help_page,
                 help_scroll,
             );
         }
@@ -284,8 +286,9 @@ pub(crate) fn expected_worktree_dir(project_dir: &str, wt_name: &str) -> String 
     }
 }
 
-fn open_help(show_help: &mut bool, help_scroll: &mut u16) {
+fn open_help(show_help: &mut bool, help_page: &mut crate::ui::HelpPage, help_scroll: &mut u16) {
     *show_help = true;
+    *help_page = crate::ui::HelpPage::Help;
     *help_scroll = 0;
 }
 
@@ -306,6 +309,7 @@ fn process_key(
     activity_dot_enabled: bool,
     confirm_quit: bool,
     show_help: &mut bool,
+    help_page: &mut crate::ui::HelpPage,
     help_scroll: &mut u16,
 ) -> std::io::Result<bool> {
     match mode {
@@ -557,7 +561,7 @@ fn process_key(
                     }
                 }
                 KeyCode::Char('?') | KeyCode::F(1) => {
-                    open_help(show_help, help_scroll);
+                    open_help(show_help, help_page, help_scroll);
                 }
                 KeyCode::Esc if confirm_quit => return Ok(false),
                 KeyCode::Esc | KeyCode::Char('q') => return Ok(true),
@@ -755,7 +759,7 @@ fn process_key(
                 input.pop();
             }
             KeyCode::F(1) => {
-                open_help(show_help, help_scroll);
+                open_help(show_help, help_page, help_scroll);
             }
             KeyCode::Char(c) => {
                 input.push(c);
@@ -795,11 +799,11 @@ fn process_key(
 
             match key.code {
                 KeyCode::F(1) => {
-                    open_help(show_help, help_scroll);
+                    open_help(show_help, help_page, help_scroll);
                     return Ok(false);
                 }
                 KeyCode::Char('?') if explorer.search_query().is_none() => {
-                    open_help(show_help, help_scroll);
+                    open_help(show_help, help_page, help_scroll);
                     return Ok(false);
                 }
                 KeyCode::Esc => {
@@ -1211,6 +1215,7 @@ mod tests {
             true,
             false,
             &mut false,
+            &mut crate::ui::HelpPage::Help,
             &mut 0u16,
         )
         .unwrap();
@@ -1251,6 +1256,7 @@ mod tests {
             true,
             false,
             &mut false,
+            &mut crate::ui::HelpPage::Help,
             &mut 0u16,
         )
         .unwrap();
@@ -1298,6 +1304,7 @@ mod tests {
             true,
             false,
             &mut false,
+            &mut crate::ui::HelpPage::Help,
             &mut 0u16,
         )
         .unwrap();
@@ -1340,6 +1347,7 @@ mod tests {
             true,
             false,
             &mut false,
+            &mut crate::ui::HelpPage::Help,
             &mut 0u16,
         )
         .unwrap();
@@ -1385,6 +1393,7 @@ mod tests {
             true,
             false,
             &mut false,
+            &mut crate::ui::HelpPage::Help,
             &mut 0u16,
         )
         .unwrap();
@@ -1434,6 +1443,7 @@ mod tests {
             true,
             false,
             &mut false,
+            &mut crate::ui::HelpPage::Help,
             &mut 0u16,
         )
         .unwrap();
@@ -1485,6 +1495,7 @@ mod tests {
             true,
             false,
             &mut false,
+            &mut crate::ui::HelpPage::Help,
             &mut 0u16,
         )
         .unwrap();
@@ -1533,6 +1544,7 @@ mod tests {
             true,
             false,
             &mut false,
+            &mut crate::ui::HelpPage::Help,
             &mut 0u16,
         )
         .unwrap();
@@ -1570,6 +1582,7 @@ mod tests {
             true,
             false,
             &mut false,
+            &mut crate::ui::HelpPage::Help,
             &mut 0u16,
         )
         .unwrap();
@@ -1593,6 +1606,7 @@ mod tests {
             true,
             false,
             &mut false,
+            &mut crate::ui::HelpPage::Help,
             &mut 0u16,
         )
         .unwrap();
@@ -1632,6 +1646,7 @@ mod tests {
             true,
             false,
             &mut false,
+            &mut crate::ui::HelpPage::Help,
             &mut 0u16,
         )
         .unwrap();
@@ -1669,6 +1684,7 @@ mod tests {
             true,
             false,
             &mut false,
+            &mut crate::ui::HelpPage::Help,
             &mut 0u16,
         );
         assert!(res.is_ok());
@@ -1704,6 +1720,7 @@ mod tests {
             true,
             false,
             &mut false,
+            &mut crate::ui::HelpPage::Help,
             &mut 0u16,
         )
         .unwrap();
@@ -1746,6 +1763,7 @@ mod tests {
             true,
             false,
             &mut false,
+            &mut crate::ui::HelpPage::Help,
             &mut 0u16,
         )
         .unwrap();
@@ -1784,6 +1802,7 @@ mod tests {
             true,
             false,
             &mut false,
+            &mut crate::ui::HelpPage::Help,
             &mut 0u16,
         );
         assert!(res.is_ok());
@@ -1818,6 +1837,7 @@ mod tests {
         let mut cols = 80u16;
         let entries = crate::project::build_entries(&projects, &processes);
         let mut show_help = false;
+        let mut help_page = crate::ui::HelpPage::Help;
         let mut help_scroll = 0u16;
         let event = Event::Key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
         let res = process_event(
@@ -1836,11 +1856,13 @@ mod tests {
             true,
             false,
             &mut show_help,
+            &mut help_page,
             &mut help_scroll,
         )
         .unwrap();
         assert!(!res);
         assert!(show_help);
+        assert_eq!(help_page, crate::ui::HelpPage::Help);
         assert_eq!(help_scroll, 0);
         assert!(matches!(mode, crate::Mode::Normal { .. }));
     }
@@ -1862,6 +1884,7 @@ mod tests {
         let mut cols = 80u16;
         let entries = vec![];
         let mut show_help = false;
+        let mut help_page = crate::ui::HelpPage::Help;
         let mut help_scroll = 0u16;
         let event = Event::Key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
         process_event(
@@ -1880,9 +1903,54 @@ mod tests {
             true,
             false,
             &mut show_help,
+            &mut help_page,
             &mut help_scroll,
         )
         .unwrap();
         assert!(show_help);
+        assert_eq!(help_page, crate::ui::HelpPage::Help);
+    }
+
+    #[test]
+    fn test_open_help_from_welcome_lands_on_help() {
+        // `?` while the Welcome page is open must jump to Help (2/2),
+        // not just set the visible flag.
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        let mut mode = crate::Mode::Normal { selected: 0 };
+        let mut processes = vec![];
+        let mut projects = vec![];
+        let mut next_pid = 2usize;
+        let mut next_id = 1usize;
+        let pty_system = portable_pty::NativePtySystem::default();
+        let mut rows = 24u16;
+        let mut cols = 80u16;
+        let entries = vec![];
+        let mut show_help = true;
+        let mut help_page = crate::ui::HelpPage::Welcome;
+        let mut help_scroll = 7u16;
+        let event = Event::Key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+        process_event(
+            &mut mode,
+            &mut projects,
+            &mut next_pid,
+            &mut processes,
+            &mut next_id,
+            &pty_system,
+            event,
+            &mut rows,
+            &mut cols,
+            &entries,
+            true,
+            false,
+            true,
+            false,
+            &mut show_help,
+            &mut help_page,
+            &mut help_scroll,
+        )
+        .unwrap();
+        assert!(show_help);
+        assert_eq!(help_page, crate::ui::HelpPage::Help);
+        assert_eq!(help_scroll, 0);
     }
 }

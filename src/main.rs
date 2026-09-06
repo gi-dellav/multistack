@@ -30,12 +30,12 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 use ratatui_explorer_multistack::FileExplorer;
 
 use input::process_event;
-use persistence::load_project_dirs;
+use persistence::{is_first_launch, load_project_dirs, mark_first_launch_seen};
 use process::{Process, check_tty_alive, mark_tty_seen, sync_statuses};
 use project::{Project, build_entries};
 #[cfg(feature = "attach")]
 use ui::force_full_repaint;
-use ui::{enter_tty_real, exit_temp_tty_real, exit_tty_real, render, wipe_real};
+use ui::{HelpPage, enter_tty_real, exit_temp_tty_real, exit_tty_real, render, wipe_real};
 
 #[derive(Parser)]
 #[command(
@@ -244,7 +244,17 @@ async fn run_server(cli: Cli) -> std::io::Result<()> {
     let mut reader = EventStream::new();
     let mut confirm_quit = false;
     let mut show_help = false;
+    let mut help_page = HelpPage::Help;
     let mut help_scroll: u16 = 0;
+
+    // First launch: open the Welcome page (1/2) of the help overlay, then
+    // record the marker so it only shows once. Best-effort: a marker write
+    // failure just means the welcome screen reappears next launch.
+    if is_first_launch() {
+        show_help = true;
+        help_page = HelpPage::Welcome;
+        let _ = mark_first_launch_seen();
+    }
 
     let mut render_interval = tokio::time::interval(Duration::from_millis(50));
     render_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -305,7 +315,7 @@ async fn run_server(cli: Cli) -> std::io::Result<()> {
 
         tokio::select! {
                 _ = render_interval.tick() => {
-                render(&mut terminal, &mode, &entries, &projects, &processes, term_rows, term_cols, confirm_quit, cli.no_worktree, activity_dot_enabled, show_help, help_scroll)?;
+                render(&mut terminal, &mode, &entries, &projects, &processes, term_rows, term_cols, confirm_quit, cli.no_worktree, activity_dot_enabled, show_help, help_page, help_scroll)?;
             }
             accepted = accept_attach_conn(&mut attach_tokio) => {
                 #[cfg(feature = "attach")]
@@ -357,6 +367,7 @@ async fn run_server(cli: Cli) -> std::io::Result<()> {
                     activity_dot_enabled,
                     &mut confirm_quit,
                     &mut show_help,
+                    &mut help_page,
                     &mut help_scroll,
                 )?;
                 if quit {
@@ -385,6 +396,7 @@ async fn run_server(cli: Cli) -> std::io::Result<()> {
                             activity_dot_enabled,
                             &mut confirm_quit,
                             &mut show_help,
+                            &mut help_page,
                             &mut help_scroll,
                         )?;
                         if quit {
@@ -461,17 +473,27 @@ fn dispatch_event<W: std::io::Write>(
     activity_dot_enabled: bool,
     confirm_quit: &mut bool,
     show_help: &mut bool,
+    help_page: &mut crate::ui::HelpPage,
     help_scroll: &mut u16,
 ) -> std::io::Result<bool> {
-    // Help overlay is modal: scroll / close here, never reaching the
-    // underlying mode. Only Esc closes it, so `?`/`q`/typing while open
-    // never quits or mutates state.
+    // Help overlay is modal: scroll / page / close here, never reaching
+    // the underlying mode. Only Esc closes it, so `?`/`q`/typing while
+    // open never quits or mutates state. `?`/F1 always lands on Help (2/2).
     if *show_help {
+        use crate::ui::HelpPage;
         use crossterm::event::{Event as CEvent, KeyCode};
         if let CEvent::Key(key) = &event {
             match key.code {
                 KeyCode::Esc => {
                     *show_help = false;
+                    *help_scroll = 0;
+                }
+                KeyCode::Right if *help_page == HelpPage::Welcome => {
+                    *help_page = HelpPage::Help;
+                    *help_scroll = 0;
+                }
+                KeyCode::Left if *help_page == HelpPage::Help => {
+                    *help_page = HelpPage::Welcome;
                     *help_scroll = 0;
                 }
                 KeyCode::Up | KeyCode::Char('k') => {
@@ -509,6 +531,7 @@ fn dispatch_event<W: std::io::Write>(
             no_worktree,
             activity_dot_enabled,
             *show_help,
+            *help_page,
             *help_scroll,
         )?;
         return Ok(false);
@@ -547,6 +570,7 @@ fn dispatch_event<W: std::io::Write>(
             no_worktree,
             activity_dot_enabled,
             *show_help,
+            *help_page,
             *help_scroll,
         )?;
         return Ok(false);
@@ -579,6 +603,7 @@ fn dispatch_event<W: std::io::Write>(
         activity_dot_enabled,
         *confirm_quit,
         show_help,
+        help_page,
         help_scroll,
     )?;
     // Entering (or sitting in) a TTY means its finish was seen.
@@ -599,6 +624,7 @@ fn dispatch_event<W: std::io::Write>(
             no_worktree,
             activity_dot_enabled,
             *show_help,
+            *help_page,
             *help_scroll,
         )?;
         return Ok(false);
@@ -665,6 +691,7 @@ fn dispatch_event<W: std::io::Write>(
             no_worktree,
             activity_dot_enabled,
             *show_help,
+            *help_page,
             *help_scroll,
         )?;
         return Ok(false);
@@ -694,6 +721,7 @@ fn dispatch_event<W: std::io::Write>(
                 no_worktree,
                 activity_dot_enabled,
                 *show_help,
+                *help_page,
                 *help_scroll,
             )?;
             return Ok(false);
@@ -721,6 +749,7 @@ fn dispatch_event<W: std::io::Write>(
         no_worktree,
         activity_dot_enabled,
         *show_help,
+        *help_page,
         *help_scroll,
     )?;
     Ok(false)
@@ -767,6 +796,7 @@ mod tests {
         u16,
         bool,
         bool,
+        HelpPage,
         u16,
     ) {
         // Fixed viewport: `Terminal::new` queries the *real* terminal size
@@ -795,6 +825,7 @@ mod tests {
             80,
             false,
             false,
+            HelpPage::Help,
             0,
         )
     }
@@ -813,6 +844,7 @@ mod tests {
             mut cols,
             mut confirm_quit,
             mut show_help,
+            mut help_page,
             mut help_scroll,
         ) = harness();
         // First `q`: no quit, confirmation popup raised.
@@ -832,6 +864,7 @@ mod tests {
             true,
             &mut confirm_quit,
             &mut show_help,
+            &mut help_page,
             &mut help_scroll,
         )
         .unwrap();
@@ -854,6 +887,7 @@ mod tests {
             true,
             &mut confirm_quit,
             &mut show_help,
+            &mut help_page,
             &mut help_scroll,
         )
         .unwrap();
@@ -875,6 +909,7 @@ mod tests {
             true,
             &mut confirm_quit,
             &mut show_help,
+            &mut help_page,
             &mut help_scroll,
         )
         .unwrap();
@@ -895,6 +930,7 @@ mod tests {
             mut cols,
             mut confirm_quit,
             mut show_help,
+            mut help_page,
             mut help_scroll,
         ) = harness();
         macro_rules! dispatch {
@@ -915,6 +951,7 @@ mod tests {
                     true,
                     &mut confirm_quit,
                     &mut show_help,
+                    &mut help_page,
                     &mut help_scroll,
                 )
                 .unwrap()
@@ -931,5 +968,72 @@ mod tests {
         // `q` then `Enter` quits.
         assert!(!dispatch!(key(KeyCode::Char('q'))));
         assert!(dispatch!(key(KeyCode::Enter)));
+    }
+
+    #[test]
+    fn test_help_pages_switch_with_arrows_and_reset_scroll() {
+        let (
+            mut mode,
+            mut projects,
+            mut next_project_id,
+            mut processes,
+            mut next_id,
+            pty_system,
+            mut terminal,
+            mut rows,
+            mut cols,
+            mut confirm_quit,
+            mut show_help,
+            mut help_page,
+            mut help_scroll,
+        ) = harness();
+        macro_rules! dispatch {
+            ($event:expr) => {
+                dispatch_event(
+                    $event,
+                    &mut mode,
+                    &mut projects,
+                    &mut next_project_id,
+                    &mut processes,
+                    &mut next_id,
+                    &pty_system,
+                    &mut terminal,
+                    &mut rows,
+                    &mut cols,
+                    true,
+                    false,
+                    true,
+                    &mut confirm_quit,
+                    &mut show_help,
+                    &mut help_page,
+                    &mut help_scroll,
+                )
+                .unwrap()
+            };
+        }
+        // `?` always lands on Help (2/2).
+        assert!(!dispatch!(key(KeyCode::Char('?'))));
+        assert!(show_help);
+        assert_eq!(help_page, HelpPage::Help);
+        // Right on Help is a no-op (stays on last page).
+        assert!(!dispatch!(key(KeyCode::Right)));
+        assert_eq!(help_page, HelpPage::Help);
+        // Scroll down, then Left switches to Welcome and resets scroll.
+        assert!(!dispatch!(key(KeyCode::Down)));
+        assert_eq!(help_scroll, 1);
+        assert!(!dispatch!(key(KeyCode::Left)));
+        assert_eq!(help_page, HelpPage::Welcome);
+        assert_eq!(help_scroll, 0);
+        // Left on Welcome is a no-op.
+        assert!(!dispatch!(key(KeyCode::Left)));
+        assert_eq!(help_page, HelpPage::Welcome);
+        // Right goes back to Help, scroll reset.
+        assert!(!dispatch!(key(KeyCode::Down)));
+        assert!(!dispatch!(key(KeyCode::Right)));
+        assert_eq!(help_page, HelpPage::Help);
+        assert_eq!(help_scroll, 0);
+        // Esc closes.
+        assert!(!dispatch!(key(KeyCode::Esc)));
+        assert!(!show_help);
     }
 }
