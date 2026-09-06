@@ -28,6 +28,8 @@ pub fn process_event(
     dont_save: bool,
     no_worktree: bool,
     confirm_quit: bool,
+    show_help: &mut bool,
+    help_scroll: &mut u16,
 ) -> std::io::Result<bool> {
     match event {
         Event::Resize(w, h) => {
@@ -82,6 +84,8 @@ pub fn process_event(
                 dont_save,
                 no_worktree,
                 confirm_quit,
+                show_help,
+                help_scroll,
             );
         }
         Event::Paste(text) => {
@@ -276,6 +280,11 @@ pub(crate) fn expected_worktree_dir(project_dir: &str, wt_name: &str) -> String 
     }
 }
 
+fn open_help(show_help: &mut bool, help_scroll: &mut u16) {
+    *show_help = true;
+    *help_scroll = 0;
+}
+
 #[allow(clippy::too_many_arguments)]
 fn process_key(
     mode: &mut Mode,
@@ -291,6 +300,8 @@ fn process_key(
     dont_save: bool,
     no_worktree: bool,
     confirm_quit: bool,
+    show_help: &mut bool,
+    help_scroll: &mut u16,
 ) -> std::io::Result<bool> {
     match mode {
         Mode::Normal { selected } => {
@@ -539,6 +550,9 @@ fn process_key(
                         *selected = start + idx;
                     }
                 }
+                KeyCode::Char('?') | KeyCode::F(1) => {
+                    open_help(show_help, help_scroll);
+                }
                 KeyCode::Esc if confirm_quit => return Ok(false),
                 KeyCode::Esc | KeyCode::Char('q') => return Ok(true),
                 _ => {}
@@ -732,6 +746,9 @@ fn process_key(
             KeyCode::Backspace => {
                 input.pop();
             }
+            KeyCode::F(1) => {
+                open_help(show_help, help_scroll);
+            }
             KeyCode::Char(c) => {
                 input.push(c);
             }
@@ -769,6 +786,14 @@ fn process_key(
             }
 
             match key.code {
+                KeyCode::F(1) => {
+                    open_help(show_help, help_scroll);
+                    return Ok(false);
+                }
+                KeyCode::Char('?') if explorer.search_query().is_none() => {
+                    open_help(show_help, help_scroll);
+                    return Ok(false);
+                }
                 KeyCode::Esc => {
                     *mode = Mode::Normal {
                         selected: *previous_selected,
@@ -1175,6 +1200,8 @@ mod tests {
             true,
             false,
             false,
+            &mut false,
+            &mut 0u16,
         )
         .unwrap();
         assert!(!res);
@@ -1212,6 +1239,8 @@ mod tests {
             true,
             false,
             false,
+            &mut false,
+            &mut 0u16,
         )
         .unwrap();
         if let crate::Mode::TempTty { process, .. } = mode {
@@ -1256,6 +1285,8 @@ mod tests {
             true,
             false,
             false,
+            &mut false,
+            &mut 0u16,
         )
         .unwrap();
         if let crate::Mode::Prompt { input, .. } = mode {
@@ -1295,6 +1326,8 @@ mod tests {
             true,
             false,
             false,
+            &mut false,
+            &mut 0u16,
         )
         .unwrap();
         assert!(!res);
@@ -1337,6 +1370,8 @@ mod tests {
             true,
             false,
             false,
+            &mut false,
+            &mut 0u16,
         )
         .unwrap();
         if let crate::Mode::DirPicker { explorer, .. } = mode {
@@ -1383,6 +1418,8 @@ mod tests {
             true,
             false,
             false,
+            &mut false,
+            &mut 0u16,
         )
         .unwrap();
         assert_eq!(rows, 40);
@@ -1431,6 +1468,8 @@ mod tests {
             true,
             false,
             false,
+            &mut false,
+            &mut 0u16,
         )
         .unwrap();
         assert_eq!(rows, 30);
@@ -1476,6 +1515,8 @@ mod tests {
             true,
             false,
             false,
+            &mut false,
+            &mut 0u16,
         )
         .unwrap();
         assert!(matches!(mode, crate::Mode::Normal { .. }));
@@ -1510,6 +1551,8 @@ mod tests {
             true,
             false,
             false,
+            &mut false,
+            &mut 0u16,
         )
         .unwrap();
         assert_eq!(*buf.lock(), b"a");
@@ -1530,6 +1573,8 @@ mod tests {
             true,
             false,
             false,
+            &mut false,
+            &mut 0u16,
         )
         .unwrap();
         assert_eq!(*buf.lock(), vec![0x1b, b'[', b'1', b'3', b';', b'2', b'u']);
@@ -1566,6 +1611,8 @@ mod tests {
             true,
             false,
             false,
+            &mut false,
+            &mut 0u16,
         )
         .unwrap();
         assert!(matches!(mode, crate::Mode::Normal { selected: 3 }));
@@ -1600,6 +1647,8 @@ mod tests {
             true,
             false,
             false,
+            &mut false,
+            &mut 0u16,
         );
         assert!(res.is_ok());
     }
@@ -1632,6 +1681,8 @@ mod tests {
             true,
             false,
             false,
+            &mut false,
+            &mut 0u16,
         )
         .unwrap();
         assert!(buf.lock().is_empty());
@@ -1671,6 +1722,8 @@ mod tests {
             true,
             false,
             false,
+            &mut false,
+            &mut 0u16,
         )
         .unwrap();
         if let crate::Mode::DirPicker { explorer, .. } = mode {
@@ -1706,6 +1759,8 @@ mod tests {
             true,
             false,
             false,
+            &mut false,
+            &mut 0u16,
         );
         assert!(res.is_ok());
         assert_eq!(rows, 24);
@@ -1720,5 +1775,88 @@ mod tests {
         // Ctrl+Shift with unknown char
         let key = KeyEvent::new(KeyCode::Char('!'), KeyModifiers::CONTROL);
         assert_eq!(key_to_bytes(&key), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn test_question_opens_help_overlay() {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        let mut mode = crate::Mode::Normal { selected: 0 };
+        let mut processes = vec![];
+        let mut projects = vec![crate::project::Project {
+            id: 1,
+            name: "proj".into(),
+            directory: "/tmp".into(),
+        }];
+        let mut next_pid = 2usize;
+        let mut next_id = 1usize;
+        let pty_system = portable_pty::NativePtySystem::default();
+        let mut rows = 24u16;
+        let mut cols = 80u16;
+        let entries = crate::project::build_entries(&projects, &processes);
+        let mut show_help = false;
+        let mut help_scroll = 0u16;
+        let event = Event::Key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+        let res = process_event(
+            &mut mode,
+            &mut projects,
+            &mut next_pid,
+            &mut processes,
+            &mut next_id,
+            &pty_system,
+            event,
+            &mut rows,
+            &mut cols,
+            &entries,
+            true,
+            false,
+            false,
+            &mut show_help,
+            &mut help_scroll,
+        )
+        .unwrap();
+        assert!(!res);
+        assert!(show_help);
+        assert_eq!(help_scroll, 0);
+        assert!(matches!(mode, crate::Mode::Normal { .. }));
+    }
+
+    #[test]
+    fn test_f1_opens_help_from_prompt() {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        let mut mode = crate::Mode::Prompt {
+            purpose: crate::PromptPurpose::NewProject,
+            selected: 0,
+            input: String::new(),
+        };
+        let mut processes = vec![];
+        let mut projects = vec![];
+        let mut next_pid = 2usize;
+        let mut next_id = 1usize;
+        let pty_system = portable_pty::NativePtySystem::default();
+        let mut rows = 24u16;
+        let mut cols = 80u16;
+        let entries = vec![];
+        let mut show_help = false;
+        let mut help_scroll = 0u16;
+        let event = Event::Key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
+        process_event(
+            &mut mode,
+            &mut projects,
+            &mut next_pid,
+            &mut processes,
+            &mut next_id,
+            &pty_system,
+            event,
+            &mut rows,
+            &mut cols,
+            &entries,
+            true,
+            false,
+            false,
+            &mut show_help,
+            &mut help_scroll,
+        )
+        .unwrap();
+        assert!(show_help);
     }
 }

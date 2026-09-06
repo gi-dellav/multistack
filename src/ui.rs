@@ -8,10 +8,10 @@ use crossterm::terminal::{BeginSynchronizedUpdate, Clear, ClearType, EndSynchron
 use ratatui::Terminal;
 use ratatui::backend::Backend;
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Layout};
-use ratatui::style::{Modifier, Style};
+use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{FrameExt, List, ListItem, ListState};
+use ratatui::widgets::{Block, Borders, FrameExt, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui_explorer_multistack::FileExplorer;
 
 use crate::Mode;
@@ -419,6 +419,8 @@ pub fn render<W: Write>(
     cols: u16,
     confirm_quit: bool,
     no_worktree: bool,
+    show_help: bool,
+    help_scroll: u16,
 ) -> std::io::Result<()> {
     match mode {
         Mode::Normal { selected } => render_normal(
@@ -431,13 +433,26 @@ pub fn render<W: Write>(
             cols,
             confirm_quit,
             no_worktree,
+            show_help,
+            help_scroll,
         ),
         Mode::Prompt {
             purpose,
             selected,
             input,
         } => render_prompt(
-            terminal, entries, projects, processes, *selected, purpose, input, rows, cols,
+            terminal,
+            entries,
+            projects,
+            processes,
+            *selected,
+            purpose,
+            input,
+            rows,
+            cols,
+            show_help,
+            help_scroll,
+            no_worktree,
         ),
         Mode::Tty { process_id } => {
             if let Some(proc) = processes.iter().find(|p| p.id == *process_id) {
@@ -447,8 +462,323 @@ pub fn render<W: Write>(
             }
         }
         Mode::TempTty { process, .. } => render_tty(terminal, process, rows, cols),
-        Mode::DirPicker { explorer, .. } => render_dirpicker(terminal, explorer, rows, cols),
+        Mode::DirPicker { explorer, .. } => render_dirpicker(
+            terminal,
+            explorer,
+            rows,
+            cols,
+            show_help,
+            help_scroll,
+            no_worktree,
+        ),
     }
+}
+
+/// Centered rectangle of fixed size, clamped to the available area.
+fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
+    let w = width.min(area.width.saturating_sub(2)).max(10);
+    let h = height.min(area.height.saturating_sub(2)).max(6);
+    let x = area.x + (area.width.saturating_sub(w)) / 2;
+    let y = area.y + (area.height.saturating_sub(h)) / 2;
+    Rect::new(x, y, w, h)
+}
+
+fn section_header(text: &str) -> Line<'static> {
+    Line::from(Span::styled(
+        text.to_string(),
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    ))
+}
+
+fn key_line(keys: &str, desc: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            format!("  {keys:<16}"),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(desc.to_string()),
+    ])
+}
+
+/// Full help text shown in the `?` overlay. Kept as data (not widgets) so
+/// both the overlay and tests can inspect it.
+pub fn help_content(no_worktree: bool) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::from(Span::styled(
+            "Multistack — parallel zerostack agents".to_string(),
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            "Press Esc to close  •  ↑↓ / j k / PgUp PgDn / Home End to scroll".to_string(),
+            Style::default().add_modifier(Modifier::DIM),
+        )),
+        Line::from(""),
+        section_header("SPAWN AGENTS"),
+    ];
+    if no_worktree {
+        lines.push(key_line(
+            "m",
+            "spawn bare agent (no worktree, asks name, enters TTY)",
+        ));
+    } else {
+        lines.push(key_line(
+            "n",
+            "spawn agent (asks name, creates git worktree, stays in list)",
+        ));
+        lines.push(key_line(
+            "N (shift-n)",
+            "spawn agent in parallel mode (no prompt, enters TTY)",
+        ));
+        lines.push(key_line(
+            "m",
+            "spawn bare agent (no worktree, asks name, enters TTY)",
+        ));
+    }
+    lines.extend([
+        Line::from(""),
+        section_header("ACT ON SELECTED AGENT"),
+        key_line("Enter", "drop into agent TTY (keystrokes pass through)"),
+        key_line("r", "rename agent"),
+        key_line("d", "kill agent (runs speck apply if present)"),
+        Line::from(""),
+        section_header("PROJECTS"),
+        key_line("p", "add project (directory picker)"),
+        key_line("l", "remove project + all its agents (runs speck apply)"),
+        key_line("PgUp / PgDn", "jump to prev / next project header"),
+        Line::from(""),
+        section_header("TOOLS (open in project or agent worktree)"),
+        key_line("h", "open lazygit (Esc returns to list)"),
+        key_line("s", "open $SHELL (Esc returns to list)"),
+        Line::from(""),
+        section_header("NAVIGATE LIST"),
+        key_line("↑ / ↓", "move selection"),
+        key_line("Esc / q", "quit (asks for confirmation when needed)"),
+        key_line("?", "this help (scrollable, Esc closes)"),
+        Line::from(""),
+        section_header("INSIDE TTY / PROMPT / PICKER"),
+        key_line("Esc (TTY)", "back to agent list"),
+        key_line(
+            "Enter (prompt)",
+            "confirm  •  Esc cancels  •  paste supported",
+        ),
+        key_line(
+            "Enter (picker)",
+            "add highlighted directory  •  Esc cancels",
+        ),
+        key_line("/ (picker)", "filter directories  •  Esc clears filter"),
+        Line::from(""),
+        section_header("STATUS + TIMERS"),
+        key_line("[ ] gray", "waiting — agent hasn't started yet"),
+        key_line("[~] yellow", "working — timer is running"),
+        key_line("[✓] green", "finished (stop signal received)"),
+        key_line("[X] red", "dead — process exited"),
+        key_line("[!] magenta", "git conflict — resolve it, quit asks twice"),
+        Line::from(Span::styled(
+            "  Timer shows active working time, kept accurate via status socket.".to_string(),
+            Style::default().add_modifier(Modifier::DIM),
+        )),
+        Line::from(""),
+        section_header("TIPS"),
+    ]);
+    if no_worktree {
+        lines.push(Line::from(
+            "  • Started with -w / --no-worktree: n spawns bare agents, N is disabled.",
+        ));
+    } else {
+        lines.push(Line::from(
+            "  • n creates a sibling worktree wt-<name>-… next to the project.",
+        ));
+    }
+    lines.extend([
+        Line::from("  • Failed agents stay in the list with exit reason + log tail."),
+        Line::from("  • Enter on a failed agent shows its full log, d dismisses it."),
+        Line::from("  • -c / --continue: reload the saved project list;"),
+        Line::from("    without it, start fresh from the current directory."),
+        Line::from("  • -w / --no-worktree: disable git-worktree integration"),
+        Line::from("    (n spawns a bare agent, N is disabled)."),
+        Line::from("  • --attach [PID]: mirror another running instance"),
+        Line::from("    (default: oldest; pass a PID for that one; Ctrl+\\ detaches)."),
+    ]);
+    lines
+}
+
+fn render_help_overlay(frame: &mut ratatui::Frame, area: Rect, scroll: u16, no_worktree: bool) {
+    let content = help_content(no_worktree);
+    let popup = centered_rect(
+        area,
+        72.min(area.width.saturating_sub(2)),
+        area.height.saturating_sub(2).max(10),
+    );
+    frame.render_widget(ratatui::widgets::Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(Span::styled(
+            " Help  (Esc closes) ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    if inner.height < 2 || inner.width < 2 {
+        return;
+    }
+    let footer_h = 1u16;
+    let body_h = inner.height.saturating_sub(footer_h);
+    let body = Rect::new(inner.x, inner.y, inner.width, body_h);
+    let footer_area = Rect::new(inner.x, inner.y + body_h, inner.width, footer_h);
+    let max_scroll = (content.len() as u16).saturating_sub(body_h.max(1));
+    let scroll = scroll.min(max_scroll);
+    let para = Paragraph::new(content)
+        .scroll((scroll, 0))
+        .wrap(Wrap { trim: false });
+    frame.render_widget(para, body);
+    let hint = if max_scroll == 0 {
+        Line::from(Span::styled(
+            "Esc closes",
+            Style::default().add_modifier(Modifier::DIM),
+        ))
+    } else {
+        Line::from(Span::styled(
+            format!("Esc closes • {}/{} ", scroll + 1, max_scroll + 1),
+            Style::default().add_modifier(Modifier::DIM),
+        ))
+    };
+    frame.render_widget(hint.centered(), footer_area);
+}
+
+fn quit_counts(processes: &[Process]) -> (usize, usize, usize, usize, usize, usize, usize) {
+    let mut working = 0;
+    let mut waiting = 0;
+    let mut finished = 0;
+    let mut dead = 0;
+    let mut conflict = 0;
+    let mut running = 0;
+    for p in processes {
+        if p.alive.load(Ordering::SeqCst) {
+            running += 1;
+        }
+        match p.status.load(Ordering::SeqCst) {
+            status::STATUS_WORKING => working += 1,
+            status::STATUS_NOT_YET => waiting += 1,
+            status::STATUS_FINISHED => finished += 1,
+            status::STATUS_DEAD => dead += 1,
+            status::STATUS_GIT_CONFLICT => conflict += 1,
+            _ => waiting += 1,
+        }
+    }
+    (
+        processes.len(),
+        running,
+        working,
+        waiting,
+        finished,
+        dead,
+        conflict,
+    )
+}
+
+fn render_quit_overlay(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    projects: &[Project],
+    processes: &[Process],
+) {
+    let (total, running, working, waiting, finished, dead, conflict) = quit_counts(processes);
+    let has_conflict = conflict > 0;
+    let warnings: Vec<Line> = {
+        let mut w = Vec::new();
+        if has_conflict {
+            w.push(Line::from(Span::styled(
+                "! git conflict — resolve before quitting if you can".to_string(),
+                Style::default().fg(Color::Magenta),
+            )));
+        }
+        if working > 0 || running > 0 {
+            w.push(Line::from(Span::styled(
+                "! quitting kills running agents".to_string(),
+                Style::default().fg(Color::Yellow),
+            )));
+        }
+        w
+    };
+    // Title + summary + breakdown + warnings + confirm line.
+    let height: u16 = 10 + warnings.len() as u16;
+    let popup = centered_rect(area, 56.min(area.width.saturating_sub(2)), height);
+    frame.render_widget(ratatui::widgets::Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(if has_conflict {
+            Color::Magenta
+        } else {
+            Color::Yellow
+        }))
+        .title(Span::styled(
+            " Quit Multistack? ",
+            Style::default().add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    let mut lines = vec![
+        Line::from(format!(
+            "{} project{} • {} agent{} ({} running)",
+            projects.len(),
+            if projects.len() == 1 { "" } else { "s" },
+            total,
+            if total == 1 { "" } else { "s" },
+            running,
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(
+                "[~] working ".to_string(),
+                Style::default().fg(Color::Yellow),
+            ),
+            Span::raw(format!("{working}   ")),
+            Span::styled("[ ] waiting ".to_string(), Style::default().fg(Color::Gray)),
+            Span::raw(format!("{waiting}")),
+        ]),
+        Line::from(vec![
+            Span::styled("[✓] done ".to_string(), Style::default().fg(Color::Green)),
+            Span::raw(format!("{finished}   ")),
+            Span::styled("[X] dead ".to_string(), Style::default().fg(Color::Red)),
+            Span::raw(format!("{dead}   ")),
+            Span::styled(
+                "[!] conflict ".to_string(),
+                Style::default().fg(Color::Magenta),
+            ),
+            Span::raw(format!("{conflict}")),
+        ]),
+        Line::from(""),
+    ];
+    let no_warnings = warnings.is_empty();
+    lines.extend(warnings);
+    if no_warnings {
+        lines.push(Line::from(Span::styled(
+            "Nothing running — safe to quit.".to_string(),
+            Style::default().add_modifier(Modifier::DIM),
+        )));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled(
+            "q / Enter".to_string(),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" quit   ".to_string()),
+        Span::styled(
+            "Esc / n".to_string(),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" stay".to_string()),
+    ]));
+    let para = Paragraph::new(lines).wrap(Wrap { trim: true });
+    frame.render_widget(para, inner);
 }
 
 fn find_process(processes: &[Process], id: usize) -> Option<&Process> {
@@ -488,6 +818,8 @@ fn render_normal<B: Backend>(
     cols: u16,
     confirm_quit: bool,
     no_worktree: bool,
+    show_help: bool,
+    help_scroll: u16,
 ) -> std::io::Result<()> {
     // Failure detail for the selected row: exit reason + log tail. Computed
     // outside the draw closure (locks + vt100 replay are not render work).
@@ -583,8 +915,6 @@ fn render_normal<B: Backend>(
         }
 
         if let Some((reason, tail)) = error_detail.as_ref() {
-            use ratatui::style::Color;
-            use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
             let mut text = vec![Line::from(vec![
                 Span::styled(
                     "✖ failed: ",
@@ -616,24 +946,27 @@ fn render_normal<B: Backend>(
         }
 
         let help = if confirm_quit {
-            let has_git_conflict = processes.iter().any(|p| p.status.load(Ordering::SeqCst) == status::STATUS_GIT_CONFLICT);
-            if has_git_conflict {
-                Line::from("Git conflicts! Press q to quit anyway, Esc to go back")
-            } else {
-                Line::from("Press q again to quit")
-            }
+            Line::from("q/Enter: quit   Esc: stay")
         } else if no_worktree {
             if cols < 40 {
-                Line::from("m:bare r:ren d:kill h:lg s:sh p/l:new/rmprj Enter:TTY q:quit")
+                Line::from("m:bare r:ren d:kill ?:help q:quit")
             } else {
-                Line::from("m: spawn bare  r: rename  d: kill  h: lazygit  s: shell  p/l: new/rm project  Enter: TTY  q/Esc: quit")
+                Line::from("m: bare  r: rename  d: kill  h: lazygit  s: shell  p/l: project  Enter: TTY  ?: help  q: quit")
             }
         } else if cols < 40 {
-            Line::from("n:new N:go m:bare r:ren d:kill h:lg s:sh p/l:new/rmprj Enter:TTY q:quit")
+            Line::from("n:new N:go ?:help q:quit")
         } else {
-            Line::from("n: new  N: spawn & enter  m: spawn bare  r: rename  d: kill  h: lazygit  s: shell  p/l: new/rm project  Enter: TTY  q/Esc: quit")
+            Line::from("n: new  N: spawn&enter  m: bare  r: rename  d: kill  h: lazygit  s: shell  p/l: project  Enter: TTY  ?: help  q: quit")
         };
         frame.render_widget(help, help_area);
+
+        let area = frame.area();
+        if confirm_quit {
+            render_quit_overlay(frame, area, projects, processes);
+        }
+        if show_help {
+            render_help_overlay(frame, area, help_scroll, no_worktree);
+        }
     }).map_err(|e| std::io::Error::other(format!("{e:?}")))?;
     Ok(())
 }
@@ -649,6 +982,9 @@ fn render_prompt<B: Backend>(
     input: &str,
     _rows: u16,
     cols: u16,
+    show_help: bool,
+    help_scroll: u16,
+    no_worktree: bool,
 ) -> std::io::Result<()> {
     terminal
         .draw(|frame| {
@@ -718,6 +1054,11 @@ fn render_prompt<B: Backend>(
             };
             let help = Line::from(format!("{}{}_", label, input));
             frame.render_widget(help, help_area);
+
+            if show_help {
+                let area = frame.area();
+                render_help_overlay(frame, area, help_scroll, no_worktree);
+            }
         })
         .map_err(|e| std::io::Error::other(format!("{e:?}")))?;
     Ok(())
@@ -883,6 +1224,9 @@ fn render_dirpicker<B: Backend>(
     explorer: &FileExplorer,
     _rows: u16,
     cols: u16,
+    show_help: bool,
+    help_scroll: u16,
+    no_worktree: bool,
 ) -> std::io::Result<()> {
     terminal.draw(|frame| {
         let layout = Layout::vertical([
@@ -907,11 +1251,16 @@ fn render_dirpicker<B: Backend>(
                 Line::from(format!("/{}  Esc: clear search", query))
             }
         } else if cols < 40 {
-            Line::from("Enter:pick Esc:cancel arrows:nav /:search")
+            Line::from("Enter:pick Esc:cancel arrows:nav /:search ?:help")
         } else {
-            Line::from("Enter: pick directory  Esc: cancel  \u{2191}\u{2193}\u{2190}\u{2192}: navigate  /: search")
+            Line::from("Enter: pick directory  Esc: cancel  \u{2191}\u{2193}\u{2190}\u{2192}: navigate  /: search  ?: help")
         };
         frame.render_widget(help, help_area);
+
+        if show_help {
+            let area = frame.area();
+            render_help_overlay(frame, area, help_scroll, no_worktree);
+        }
     }).map_err(|e| std::io::Error::other(format!("{e:?}")))?;
     Ok(())
 }
@@ -1091,6 +1440,8 @@ mod tests {
             80,
             false,
             false,
+            false,
+            0,
         );
         assert!(res.is_ok());
         let res = render_prompt(
@@ -1103,6 +1454,9 @@ mod tests {
             "input",
             24,
             80,
+            false,
+            0,
+            false,
         );
         assert!(res.is_ok());
     }
@@ -1226,6 +1580,8 @@ mod tests {
             30,
             false,
             false,
+            false,
+            0,
         )
         .unwrap();
 
@@ -1251,6 +1607,8 @@ mod tests {
             30,
             false,
             false,
+            false,
+            0,
         )
         .unwrap();
         let screen: String = terminal
@@ -1366,6 +1724,8 @@ mod tests {
             30,
             false,
             false,
+            false,
+            0,
         )
         .unwrap();
         enter_tty(&mut terminal, &proc).unwrap();
@@ -1391,6 +1751,8 @@ mod tests {
             30,
             false,
             false,
+            false,
+            0,
         )
         .unwrap();
         let lines: Vec<String> = (0..8)
@@ -1437,6 +1799,8 @@ mod tests {
             30,
             false,
             false,
+            false,
+            0,
         )
         .unwrap();
         render_normal(
@@ -1449,6 +1813,8 @@ mod tests {
             30,
             false,
             false,
+            false,
+            0,
         )
         .unwrap();
         let size = terminal.backend().size().unwrap();
@@ -1475,6 +1841,8 @@ mod tests {
             30,
             false,
             false,
+            false,
+            0,
         )
         .unwrap();
         let size = terminal.backend().size().unwrap();
@@ -1635,5 +2003,134 @@ mod tests {
         assert!(proc.parser.lock().screen().alternate_screen());
         let (content, _) = tty_frame(&proc).expect("alt frame");
         assert!(content.windows(11).any(|w| w == b"alt content"));
+    }
+
+    #[test]
+    fn test_help_content_has_sections() {
+        for no_worktree in [false, true] {
+            let lines = help_content(no_worktree);
+            assert!(lines.len() > 20, "help should be scrollable");
+            let text: String = lines
+                .iter()
+                .map(|l| {
+                    l.spans
+                        .iter()
+                        .map(|s| s.content.to_string())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            for section in [
+                "SPAWN AGENTS",
+                "ACT ON SELECTED AGENT",
+                "PROJECTS",
+                "STATUS + TIMERS",
+                "TIPS",
+            ] {
+                assert!(text.contains(section), "missing {section}");
+            }
+        }
+        // Worktree mode documents n/N, bare mode documents the --no-worktree note.
+        let wt: String = help_content(false)
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(wt.contains("worktree"));
+        let bare: String = help_content(true)
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(bare.contains("--no-worktree"));
+    }
+
+    #[test]
+    fn test_render_help_and_quit_overlays_do_not_panic() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let projects = vec![crate::project::Project {
+            id: 1,
+            name: "proj".into(),
+            directory: "/tmp".into(),
+        }];
+        let proc = make_proc_with_content(b"", 24, 80);
+        let entries = crate::project::build_entries(&projects, std::slice::from_ref(&proc));
+        // Help overlay, top and scrolled.
+        for scroll in [0, 5, u16::MAX] {
+            let res = render_normal(
+                &mut terminal,
+                &entries,
+                &projects,
+                &[],
+                0,
+                24,
+                80,
+                false,
+                false,
+                true,
+                scroll,
+            );
+            assert!(res.is_ok());
+        }
+        // Quit overlay with no agents and with agents.
+        let res = render_normal(
+            &mut terminal,
+            &entries,
+            &projects,
+            &[],
+            0,
+            24,
+            80,
+            true,
+            false,
+            false,
+            0,
+        );
+        assert!(res.is_ok());
+        // Tiny screen: overlays must clamp, never panic.
+        let backend = TestBackend::new(30, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let res = render_normal(
+            &mut terminal,
+            &entries,
+            &projects,
+            &[],
+            0,
+            10,
+            30,
+            true,
+            false,
+            true,
+            100,
+        );
+        assert!(res.is_ok());
+    }
+
+    #[test]
+    fn test_quit_counts_breakdown() {
+        use std::sync::atomic::Ordering;
+        let a = make_proc_with_content(b"", 24, 80);
+        a.status
+            .store(crate::status::STATUS_WORKING, Ordering::SeqCst);
+        let b = make_proc_with_content(b"", 24, 80);
+        b.status
+            .store(crate::status::STATUS_GIT_CONFLICT, Ordering::SeqCst);
+        let procs = vec![a, b];
+        let (total, running, working, _waiting, _finished, _dead, conflict) = quit_counts(&procs);
+        assert_eq!(total, 2);
+        assert_eq!(running, 2);
+        assert_eq!(working, 1);
+        assert_eq!(conflict, 1);
     }
 }

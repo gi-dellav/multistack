@@ -239,6 +239,8 @@ async fn run_server(cli: Cli) -> std::io::Result<()> {
     let mut reader = EventStream::new();
     let mut suppress_quit = false;
     let mut confirm_quit = false;
+    let mut show_help = false;
+    let mut help_scroll: u16 = 0;
 
     let mut render_interval = tokio::time::interval(Duration::from_millis(50));
     render_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -300,7 +302,7 @@ async fn run_server(cli: Cli) -> std::io::Result<()> {
 
         tokio::select! {
                 _ = render_interval.tick() => {
-                render(&mut terminal, &mode, &entries, &projects, &processes, term_rows, term_cols, confirm_quit, cli.no_worktree)?;
+                render(&mut terminal, &mode, &entries, &projects, &processes, term_rows, term_cols, confirm_quit, cli.no_worktree, show_help, help_scroll)?;
             }
             accepted = accept_attach_conn(&mut attach_tokio) => {
                 #[cfg(feature = "attach")]
@@ -351,6 +353,8 @@ async fn run_server(cli: Cli) -> std::io::Result<()> {
                     cli.no_worktree,
                     &mut suppress_quit,
                     &mut confirm_quit,
+                    &mut show_help,
+                    &mut help_scroll,
                 )?;
                 if quit {
                     restore_terminal(&mut terminal, supports_keyboard_enhancement);
@@ -377,6 +381,8 @@ async fn run_server(cli: Cli) -> std::io::Result<()> {
                             cli.no_worktree,
                             &mut suppress_quit,
                             &mut confirm_quit,
+                            &mut show_help,
+                            &mut help_scroll,
                         )?;
                         if quit {
                             restore_terminal(&mut terminal, supports_keyboard_enhancement);
@@ -451,7 +457,99 @@ fn dispatch_event<W: std::io::Write>(
     no_worktree: bool,
     suppress_quit: &mut bool,
     confirm_quit: &mut bool,
+    show_help: &mut bool,
+    help_scroll: &mut u16,
 ) -> std::io::Result<bool> {
+    // Help overlay is modal: scroll / close here, never reaching the
+    // underlying mode. Only Esc closes it, so `?`/`q`/typing while open
+    // never quits or mutates state.
+    if *show_help {
+        use crossterm::event::{Event as CEvent, KeyCode};
+        if let CEvent::Key(key) = &event {
+            match key.code {
+                KeyCode::Esc => {
+                    *show_help = false;
+                    *help_scroll = 0;
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    *help_scroll = help_scroll.saturating_sub(1);
+                }
+                KeyCode::Down | KeyCode::Char('j') | KeyCode::Enter => {
+                    *help_scroll = help_scroll.saturating_add(1);
+                }
+                KeyCode::PageUp => {
+                    *help_scroll = help_scroll.saturating_sub(10);
+                }
+                KeyCode::PageDown | KeyCode::Char(' ') => {
+                    *help_scroll = help_scroll.saturating_add(10);
+                }
+                KeyCode::Home => {
+                    *help_scroll = 0;
+                }
+                KeyCode::End => {
+                    *help_scroll = u16::MAX;
+                }
+                _ => {}
+            }
+        }
+        let entries = build_entries(projects, processes);
+        sync_statuses(processes);
+        render(
+            terminal,
+            mode,
+            &entries,
+            projects,
+            processes,
+            *term_rows,
+            *term_cols,
+            *confirm_quit,
+            no_worktree,
+            *show_help,
+            *help_scroll,
+        )?;
+        return Ok(false);
+    }
+
+    // Quit confirmation is modal too: only explicit quit/stay keys count,
+    // everything else keeps the popup on screen.
+    if *confirm_quit {
+        use crossterm::event::{Event as CEvent, KeyCode};
+        if let CEvent::Key(key) = &event {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+                    *confirm_quit = false;
+                }
+                KeyCode::Char('q')
+                | KeyCode::Char('Q')
+                | KeyCode::Char('y')
+                | KeyCode::Char('Y')
+                | KeyCode::Enter => {
+                    return Ok(true);
+                }
+                _ => {
+                    // Swallow: keep the popup visible instead of dismissing
+                    // it on unrelated keys (arrows, etc.).
+                }
+            }
+        }
+        let entries = build_entries(projects, processes);
+        sync_statuses(processes);
+        render(
+            terminal,
+            mode,
+            &entries,
+            projects,
+            processes,
+            *term_rows,
+            *term_cols,
+            *confirm_quit,
+            no_worktree,
+            *show_help,
+            *help_scroll,
+        )?;
+        return Ok(false);
+    }
+
     let was_tty_before_event = matches!(mode, Mode::Tty { .. } | Mode::TempTty { .. });
     // Snapshot the TTY identity *before* dispatch: after `process_event`
     // runs, `mode` may already be the new mode and we can no longer tell
@@ -477,7 +575,28 @@ fn dispatch_event<W: std::io::Write>(
         dont_save,
         no_worktree,
         *confirm_quit,
+        show_help,
+        help_scroll,
     )?;
+    // Opening the help overlay renders immediately below.
+    if *show_help {
+        let entries = build_entries(projects, processes);
+        sync_statuses(processes);
+        render(
+            terminal,
+            mode,
+            &entries,
+            projects,
+            processes,
+            *term_rows,
+            *term_cols,
+            *confirm_quit,
+            no_worktree,
+            *show_help,
+            *help_scroll,
+        )?;
+        return Ok(false);
+    }
 
     // Any transition *into* a TTY mode must start from a blank physical
     // screen with a dropped diff cache, or the first frame diffs TTY content
@@ -539,6 +658,8 @@ fn dispatch_event<W: std::io::Write>(
             *term_cols,
             *confirm_quit,
             no_worktree,
+            *show_help,
+            *help_scroll,
         )?;
         return Ok(false);
     }
@@ -558,6 +679,8 @@ fn dispatch_event<W: std::io::Write>(
                 *term_cols,
                 *confirm_quit,
                 no_worktree,
+                *show_help,
+                *help_scroll,
             )?;
             return Ok(false);
         }
@@ -577,6 +700,8 @@ fn dispatch_event<W: std::io::Write>(
                 *term_cols,
                 *confirm_quit,
                 no_worktree,
+                *show_help,
+                *help_scroll,
             )?;
             return Ok(false);
         }
@@ -605,6 +730,8 @@ fn dispatch_event<W: std::io::Write>(
         *term_cols,
         *confirm_quit,
         no_worktree,
+        *show_help,
+        *help_scroll,
     )?;
     Ok(false)
 }
