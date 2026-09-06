@@ -419,6 +419,7 @@ pub fn render<W: Write>(
     cols: u16,
     confirm_quit: bool,
     no_worktree: bool,
+    activity_dot_enabled: bool,
     show_help: bool,
     help_scroll: u16,
 ) -> std::io::Result<()> {
@@ -433,6 +434,7 @@ pub fn render<W: Write>(
             cols,
             confirm_quit,
             no_worktree,
+            activity_dot_enabled,
             show_help,
             help_scroll,
         ),
@@ -453,6 +455,7 @@ pub fn render<W: Write>(
             show_help,
             help_scroll,
             no_worktree,
+            activity_dot_enabled,
         ),
         Mode::Tty { process_id } => {
             if let Some(proc) = processes.iter().find(|p| p.id == *process_id) {
@@ -577,6 +580,7 @@ pub fn help_content(no_worktree: bool) -> Vec<Line<'static>> {
         key_line("[✓] green", "finished (stop signal received)"),
         key_line("[X] red", "dead — process exited"),
         key_line("[!] magenta", "git conflict — resolve it, quit asks twice"),
+        key_line("● yellow", "unread — agent finished, Enter clears it"),
         Line::from(Span::styled(
             "  Timer shows active working time, kept accurate via status socket.".to_string(),
             Style::default().add_modifier(Modifier::DIM),
@@ -600,6 +604,7 @@ pub fn help_content(no_worktree: bool) -> Vec<Line<'static>> {
         Line::from("    without it, start fresh from the current directory."),
         Line::from("  • -w / --no-worktree: disable git-worktree integration"),
         Line::from("    (n spawns a bare agent, N is disabled)."),
+        Line::from("  • -D / --no-activity-dot: disable the unread ● dot."),
         Line::from("  • --attach [PID]: mirror another running instance"),
         Line::from("    (default: oldest; pass a PID for that one; Ctrl+\\ detaches)."),
     ]);
@@ -789,7 +794,7 @@ fn find_project(projects: &[Project], id: usize) -> Option<&Project> {
     projects.iter().find(|p| p.id == id)
 }
 
-fn process_item(proc: &Process) -> ListItem<'static> {
+fn process_item(proc: &Process, activity_dot_enabled: bool) -> ListItem<'static> {
     let status_val = proc.status.load(Ordering::SeqCst);
     let prefix = status::status_prefix(status_val);
     let color = status::status_color(status_val);
@@ -803,8 +808,16 @@ fn process_item(proc: &Process) -> ListItem<'static> {
     {
         text.push_str(&format!("  ({reason})"));
     }
-    let line = Line::from(Span::styled(text, Style::default().fg(color)));
-    ListItem::new(line)
+    let mut spans = vec![Span::styled(text, Style::default().fg(color))];
+    if activity_dot_enabled && proc.has_unread.load(Ordering::SeqCst) {
+        spans.push(Span::styled(
+            " ●",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    ListItem::new(Line::from(spans))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -818,6 +831,7 @@ fn render_normal<B: Backend>(
     cols: u16,
     confirm_quit: bool,
     no_worktree: bool,
+    activity_dot_enabled: bool,
     show_help: bool,
     help_scroll: u16,
 ) -> std::io::Result<()> {
@@ -899,7 +913,7 @@ fn render_normal<B: Backend>(
                     }
                     ListEntry::Agent(proc_id) => {
                         if let Some(proc) = find_process(processes, *proc_id) {
-                            process_item(proc)
+                            process_item(proc, activity_dot_enabled)
                         } else {
                             ListItem::new("")
                         }
@@ -985,6 +999,7 @@ fn render_prompt<B: Backend>(
     show_help: bool,
     help_scroll: u16,
     no_worktree: bool,
+    activity_dot_enabled: bool,
 ) -> std::io::Result<()> {
     terminal
         .draw(|frame| {
@@ -1030,7 +1045,7 @@ fn render_prompt<B: Backend>(
                         }
                         ListEntry::Agent(proc_id) => {
                             if let Some(proc) = find_process(processes, *proc_id) {
-                                process_item(proc)
+                                process_item(proc, activity_dot_enabled)
                             } else {
                                 ListItem::new("")
                             }
@@ -1299,6 +1314,7 @@ mod tests {
             status: Arc::new(AtomicU8::new(0)),
             active_ms: Arc::new(AtomicU64::new(0)),
             cycle_start: Arc::new(Mutex::new(None)),
+            has_unread: Arc::new(AtomicBool::new(false)),
             status_socket_path: None,
             shutdown_flag: None,
             listener_thread: None,
@@ -1440,6 +1456,7 @@ mod tests {
             80,
             false,
             false,
+            true,
             false,
             0,
         );
@@ -1457,6 +1474,7 @@ mod tests {
             false,
             0,
             false,
+            true,
         );
         assert!(res.is_ok());
     }
@@ -1580,6 +1598,7 @@ mod tests {
             30,
             false,
             false,
+            true,
             false,
             0,
         )
@@ -1607,6 +1626,7 @@ mod tests {
             30,
             false,
             false,
+            true,
             false,
             0,
         )
@@ -1724,6 +1744,7 @@ mod tests {
             30,
             false,
             false,
+            true,
             false,
             0,
         )
@@ -1751,6 +1772,7 @@ mod tests {
             30,
             false,
             false,
+            true,
             false,
             0,
         )
@@ -1799,6 +1821,7 @@ mod tests {
             30,
             false,
             false,
+            true,
             false,
             0,
         )
@@ -1813,6 +1836,7 @@ mod tests {
             30,
             false,
             false,
+            true,
             false,
             0,
         )
@@ -1841,6 +1865,7 @@ mod tests {
             30,
             false,
             false,
+            true,
             false,
             0,
         )
@@ -2053,6 +2078,64 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(bare.contains("--no-worktree"));
+        assert!(wt.contains("●"), "help should document the unread dot");
+        assert!(wt.contains("--no-activity-dot"));
+    }
+
+    #[test]
+    fn test_process_item_unread_dot() {
+        use std::sync::atomic::Ordering;
+        fn screen_text(terminal: &Terminal<TestBackend>) -> String {
+            terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|c| c.symbol().to_string())
+                .collect()
+        }
+        fn render_with(unread: bool, dot_enabled: bool) -> String {
+            let backend = TestBackend::new(80, 24);
+            let mut terminal = Terminal::new(backend).unwrap();
+            let projects = vec![crate::project::Project {
+                id: 1,
+                name: "proj".into(),
+                directory: "/tmp".into(),
+            }];
+            let proc = make_proc_with_content(b"", 24, 80);
+            proc.has_unread.store(unread, Ordering::SeqCst);
+            let entries = crate::project::build_entries(&projects, std::slice::from_ref(&proc));
+            // NB: `entries` borrows `proc`, so pass `proc` itself as the
+            // processes slice to keep the unread flag visible to the renderer.
+            render_normal(
+                &mut terminal,
+                &entries,
+                &projects,
+                std::slice::from_ref(&proc),
+                0,
+                24,
+                80,
+                false,
+                false,
+                dot_enabled,
+                false,
+                0,
+            )
+            .unwrap();
+            screen_text(&terminal)
+        }
+        assert!(
+            render_with(true, true).contains("●"),
+            "unread dot should render when enabled"
+        );
+        assert!(
+            !render_with(true, false).contains("●"),
+            "dot must be hidden with -D"
+        );
+        assert!(
+            !render_with(false, true).contains("●"),
+            "no dot once the agent was seen"
+        );
     }
 
     #[test]
@@ -2079,6 +2162,7 @@ mod tests {
                 false,
                 false,
                 true,
+                true,
                 scroll,
             );
             assert!(res.is_ok());
@@ -2094,6 +2178,7 @@ mod tests {
             80,
             true,
             false,
+            true,
             false,
             0,
         );
@@ -2111,6 +2196,7 @@ mod tests {
             30,
             true,
             false,
+            true,
             true,
             100,
         );

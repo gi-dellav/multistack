@@ -27,6 +27,7 @@ pub fn process_event(
     entries: &[ListEntry],
     dont_save: bool,
     no_worktree: bool,
+    activity_dot_enabled: bool,
     confirm_quit: bool,
     show_help: &mut bool,
     help_scroll: &mut u16,
@@ -83,6 +84,7 @@ pub fn process_event(
                 entries,
                 dont_save,
                 no_worktree,
+                activity_dot_enabled,
                 confirm_quit,
                 show_help,
                 help_scroll,
@@ -152,6 +154,7 @@ fn spawn_zerostack(
     term_rows: u16,
     term_cols: u16,
     selected: &mut usize,
+    activity_dot_enabled: bool,
 ) {
     let id = *next_id;
     let mut rand_bytes = [0u8; 4];
@@ -198,6 +201,7 @@ fn spawn_zerostack(
         Some(&socket_path),
         project_dir,
         worktree_dir.as_deref(),
+        activity_dot_enabled,
     ) {
         Ok(proc) => {
             if processes.is_empty() {
@@ -299,6 +303,7 @@ fn process_key(
     entries: &[ListEntry],
     dont_save: bool,
     no_worktree: bool,
+    activity_dot_enabled: bool,
     confirm_quit: bool,
     show_help: &mut bool,
     help_scroll: &mut u16,
@@ -341,6 +346,7 @@ fn process_key(
                             term_rows,
                             term_cols,
                             selected,
+                            activity_dot_enabled,
                         );
                         if processes.len() > len_before
                             && let Some(proc) = processes.last()
@@ -642,6 +648,7 @@ fn process_key(
                                 term_rows,
                                 term_cols,
                                 selected,
+                                activity_dot_enabled,
                             );
                         }
                     }
@@ -664,6 +671,7 @@ fn process_key(
                                 term_rows,
                                 term_cols,
                                 selected,
+                                activity_dot_enabled,
                             );
                         }
                     }
@@ -1160,6 +1168,7 @@ mod tests {
             status: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0)),
             active_ms: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cycle_start: std::sync::Arc::new(parking_lot::Mutex::new(None)),
+            has_unread: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             status_socket_path: None,
             shutdown_flag: None,
             listener_thread: None,
@@ -1199,6 +1208,7 @@ mod tests {
             &entries,
             true,
             false,
+            true,
             false,
             &mut false,
             &mut 0u16,
@@ -1238,6 +1248,7 @@ mod tests {
             &entries,
             true,
             false,
+            true,
             false,
             &mut false,
             &mut 0u16,
@@ -1284,6 +1295,7 @@ mod tests {
             &entries,
             true,
             false,
+            true,
             false,
             &mut false,
             &mut 0u16,
@@ -1325,6 +1337,7 @@ mod tests {
             &entries,
             true,
             false,
+            true,
             false,
             &mut false,
             &mut 0u16,
@@ -1369,6 +1382,7 @@ mod tests {
             &entries,
             true,
             false,
+            true,
             false,
             &mut false,
             &mut 0u16,
@@ -1417,6 +1431,7 @@ mod tests {
             &entries,
             true,
             false,
+            true,
             false,
             &mut false,
             &mut 0u16,
@@ -1467,6 +1482,7 @@ mod tests {
             &entries,
             true,
             false,
+            true,
             false,
             &mut false,
             &mut 0u16,
@@ -1514,6 +1530,7 @@ mod tests {
             &entries,
             true,
             false,
+            true,
             false,
             &mut false,
             &mut 0u16,
@@ -1550,6 +1567,7 @@ mod tests {
             &entries,
             true,
             false,
+            true,
             false,
             &mut false,
             &mut 0u16,
@@ -1572,6 +1590,7 @@ mod tests {
             &entries,
             true,
             false,
+            true,
             false,
             &mut false,
             &mut 0u16,
@@ -1610,6 +1629,7 @@ mod tests {
             &entries,
             true,
             false,
+            true,
             false,
             &mut false,
             &mut 0u16,
@@ -1646,6 +1666,7 @@ mod tests {
             &entries,
             true,
             false,
+            true,
             false,
             &mut false,
             &mut 0u16,
@@ -1680,6 +1701,7 @@ mod tests {
             &entries,
             true,
             false,
+            true,
             false,
             &mut false,
             &mut 0u16,
@@ -1721,6 +1743,7 @@ mod tests {
             &entries,
             true,
             false,
+            true,
             false,
             &mut false,
             &mut 0u16,
@@ -1758,6 +1781,7 @@ mod tests {
             &entries,
             true,
             false,
+            true,
             false,
             &mut false,
             &mut 0u16,
@@ -1809,6 +1833,7 @@ mod tests {
             &entries,
             true,
             false,
+            true,
             false,
             &mut show_help,
             &mut help_scroll,
@@ -1852,6 +1877,7 @@ mod tests {
             &entries,
             true,
             false,
+            true,
             false,
             &mut show_help,
             &mut help_scroll,

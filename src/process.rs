@@ -28,6 +28,9 @@ pub struct Process {
     pub status: Arc<AtomicU8>,
     pub active_ms: Arc<AtomicU64>,
     pub cycle_start: Arc<Mutex<Option<Instant>>>,
+    /// Set when the agent finishes working (`stop` signal) and cleared when
+    /// its TTY is opened. Drives the unread-activity dot in the list view.
+    pub has_unread: Arc<AtomicBool>,
     pub status_socket_path: Option<String>,
     pub shutdown_flag: Option<Arc<AtomicBool>>,
     pub listener_thread: Option<JoinHandle<()>>,
@@ -56,6 +59,22 @@ impl Process {
         self.worktree_dir
             .clone()
             .unwrap_or_else(|| self.project_dir.clone())
+    }
+
+    /// Clear the unread-activity dot (agent has been viewed).
+    pub fn mark_seen(&self) {
+        self.has_unread.store(false, Ordering::SeqCst);
+    }
+}
+
+/// Clear the unread flag for the process currently shown in a TTY, if any.
+/// Call before every render so a `stop` that lands while the user is watching
+/// never produces a stale dot when they return to the list.
+pub fn mark_tty_seen(mode: &Mode, processes: &[Process]) {
+    if let Mode::Tty { process_id } = mode
+        && let Some(proc) = processes.iter().find(|p| p.id == *process_id)
+    {
+        proc.mark_seen();
     }
 }
 
@@ -325,6 +344,7 @@ pub fn spawn_pty(
         status: Arc::new(AtomicU8::new(status::STATUS_NOT_YET)),
         active_ms: Arc::new(AtomicU64::new(0)),
         cycle_start: Arc::new(Mutex::new(None)),
+        has_unread: Arc::new(AtomicBool::new(false)),
         status_socket_path: None,
         shutdown_flag: None,
         listener_thread: None,
@@ -350,6 +370,7 @@ pub fn spawn_process(
     status_socket: Option<&str>,
     cwd: &str,
     worktree_dir: Option<&str>,
+    activity_dot_enabled: bool,
 ) -> std::io::Result<Process> {
     let id = *next_id;
     *next_id += 1;
@@ -366,6 +387,8 @@ pub fn spawn_process(
             proc.status.clone(),
             proc.active_ms.clone(),
             proc.cycle_start.clone(),
+            proc.has_unread.clone(),
+            activity_dot_enabled,
             path.to_string(),
             name_shared.clone(),
             proc.project_dir.clone(),
@@ -490,14 +513,15 @@ mod tests {
             status: Arc::new(AtomicU8::new(status)),
             active_ms: Arc::new(AtomicU64::new(active_ms)),
             cycle_start: Arc::new(parking_lot::Mutex::new(cycle_start)),
+            has_unread: Arc::new(AtomicBool::new(false)),
             status_socket_path: None,
             shutdown_flag: None,
             listener_thread: None,
             kill_on_drop: false,
             name_shared: None,
             prev_screen: Arc::new(parking_lot::Mutex::new(None)),
-            exit_code: Arc::new(parking_lot::Mutex::new(None)),
-            exit_signal: Arc::new(parking_lot::Mutex::new(None)),
+            exit_code: Arc::new(Mutex::new(None)),
+            exit_signal: Arc::new(Mutex::new(None)),
             log_buffer: Arc::new(parking_lot::Mutex::new(Vec::new())),
         }
     }
@@ -782,5 +806,36 @@ mod tests {
     fn test_log_tail_lines_empty() {
         assert!(log_tail_lines(&[], 24, 80, 6).is_empty());
         assert!(log_tail_lines(b"hi", 24, 80, 0).is_empty());
+    }
+
+    #[test]
+    fn test_mark_seen_clears_unread() {
+        let p = make_test_process(true, status::STATUS_FINISHED, 0, false);
+        p.has_unread.store(true, Ordering::SeqCst);
+        p.mark_seen();
+        assert!(!p.has_unread.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_mark_tty_seen_clears_viewed_process_only() {
+        let p1 = make_test_process(true, status::STATUS_FINISHED, 0, false);
+        let mut p2_mut = make_test_process(true, status::STATUS_FINISHED, 0, false);
+        p2_mut.id = 2;
+        let p2 = p2_mut;
+        p1.has_unread.store(true, Ordering::SeqCst);
+        p2.has_unread.store(true, Ordering::SeqCst);
+        let processes = vec![p1, p2];
+        mark_tty_seen(&crate::Mode::Tty { process_id: 1 }, &processes);
+        assert!(!processes[0].has_unread.load(Ordering::SeqCst));
+        assert!(processes[1].has_unread.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_mark_tty_seen_noop_outside_tty() {
+        let p = make_test_process(true, status::STATUS_FINISHED, 0, false);
+        p.has_unread.store(true, Ordering::SeqCst);
+        let processes = vec![p];
+        mark_tty_seen(&crate::Mode::Normal { selected: 0 }, &processes);
+        assert!(processes[0].has_unread.load(Ordering::SeqCst));
     }
 }

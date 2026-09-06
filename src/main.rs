@@ -31,7 +31,7 @@ use ratatui_explorer_multistack::FileExplorer;
 
 use input::process_event;
 use persistence::load_project_dirs;
-use process::{Process, check_tty_alive, sync_statuses};
+use process::{Process, check_tty_alive, mark_tty_seen, sync_statuses};
 use project::{Project, build_entries};
 #[cfg(feature = "attach")]
 use ui::force_full_repaint;
@@ -64,6 +64,13 @@ struct Cli {
         help = "Disable worktree integration (n spawns bare agent, N disabled)"
     )]
     no_worktree: bool,
+    #[arg(
+        short = 'D',
+        long = "no-activity-dot",
+        default_value_t = false,
+        help = "Disable the unread-activity dot shown when an agent finishes"
+    )]
+    no_activity_dot: bool,
     /// Attach to another running multistack instance. With no value, attaches
     /// to the oldest running instance; with a PID (`--attach 1234`), attaches
     /// to that instance. Ctrl+\ detaches. Compile-time feature `attach`
@@ -291,10 +298,14 @@ async fn run_server(cli: Cli) -> std::io::Result<()> {
         }
 
         sync_statuses(&mut processes);
+        let activity_dot_enabled = !cli.no_activity_dot;
+        // A `stop` that lands while its TTY is open was already seen: clear
+        // it every frame so no stale dot appears when returning to the list.
+        mark_tty_seen(&mode, &processes);
 
         tokio::select! {
                 _ = render_interval.tick() => {
-                render(&mut terminal, &mode, &entries, &projects, &processes, term_rows, term_cols, confirm_quit, cli.no_worktree, show_help, help_scroll)?;
+                render(&mut terminal, &mode, &entries, &projects, &processes, term_rows, term_cols, confirm_quit, cli.no_worktree, activity_dot_enabled, show_help, help_scroll)?;
             }
             accepted = accept_attach_conn(&mut attach_tokio) => {
                 #[cfg(feature = "attach")]
@@ -343,6 +354,7 @@ async fn run_server(cli: Cli) -> std::io::Result<()> {
                     &mut term_cols,
                     cli.dont_save,
                     cli.no_worktree,
+                    activity_dot_enabled,
                     &mut confirm_quit,
                     &mut show_help,
                     &mut help_scroll,
@@ -370,6 +382,7 @@ async fn run_server(cli: Cli) -> std::io::Result<()> {
                             &mut term_cols,
                             cli.dont_save,
                             cli.no_worktree,
+                            activity_dot_enabled,
                             &mut confirm_quit,
                             &mut show_help,
                             &mut help_scroll,
@@ -445,6 +458,7 @@ fn dispatch_event<W: std::io::Write>(
     term_cols: &mut u16,
     dont_save: bool,
     no_worktree: bool,
+    activity_dot_enabled: bool,
     confirm_quit: &mut bool,
     show_help: &mut bool,
     help_scroll: &mut u16,
@@ -493,6 +507,7 @@ fn dispatch_event<W: std::io::Write>(
             *term_cols,
             *confirm_quit,
             no_worktree,
+            activity_dot_enabled,
             *show_help,
             *help_scroll,
         )?;
@@ -530,6 +545,7 @@ fn dispatch_event<W: std::io::Write>(
             *term_cols,
             *confirm_quit,
             no_worktree,
+            activity_dot_enabled,
             *show_help,
             *help_scroll,
         )?;
@@ -560,10 +576,13 @@ fn dispatch_event<W: std::io::Write>(
         &entries,
         dont_save,
         no_worktree,
+        activity_dot_enabled,
         *confirm_quit,
         show_help,
         help_scroll,
     )?;
+    // Entering (or sitting in) a TTY means its finish was seen.
+    mark_tty_seen(mode, processes);
     // Opening the help overlay renders immediately below.
     if *show_help {
         let entries = build_entries(projects, processes);
@@ -578,6 +597,7 @@ fn dispatch_event<W: std::io::Write>(
             *term_cols,
             *confirm_quit,
             no_worktree,
+            activity_dot_enabled,
             *show_help,
             *help_scroll,
         )?;
@@ -643,6 +663,7 @@ fn dispatch_event<W: std::io::Write>(
             *term_cols,
             *confirm_quit,
             no_worktree,
+            activity_dot_enabled,
             *show_help,
             *help_scroll,
         )?;
@@ -671,6 +692,7 @@ fn dispatch_event<W: std::io::Write>(
                 *term_cols,
                 *confirm_quit,
                 no_worktree,
+                activity_dot_enabled,
                 *show_help,
                 *help_scroll,
             )?;
@@ -697,6 +719,7 @@ fn dispatch_event<W: std::io::Write>(
         *term_cols,
         *confirm_quit,
         no_worktree,
+        activity_dot_enabled,
         *show_help,
         *help_scroll,
     )?;
@@ -806,6 +829,7 @@ mod tests {
             &mut cols,
             true,
             false,
+            true,
             &mut confirm_quit,
             &mut show_help,
             &mut help_scroll,
@@ -827,6 +851,7 @@ mod tests {
             &mut cols,
             true,
             false,
+            true,
             &mut confirm_quit,
             &mut show_help,
             &mut help_scroll,
@@ -847,6 +872,7 @@ mod tests {
             &mut cols,
             true,
             false,
+            true,
             &mut confirm_quit,
             &mut show_help,
             &mut help_scroll,
@@ -886,6 +912,7 @@ mod tests {
                     &mut cols,
                     true,
                     false,
+                    true,
                     &mut confirm_quit,
                     &mut show_help,
                     &mut help_scroll,

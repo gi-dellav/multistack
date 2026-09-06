@@ -53,10 +53,13 @@ pub fn format_timer(active_ms: u64, cycle_start: &Option<Instant>) -> String {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_status_listener(
     status: Arc<AtomicU8>,
     active_ms: Arc<AtomicU64>,
     cycle_start: Arc<Mutex<Option<Instant>>>,
+    has_unread: Arc<AtomicBool>,
+    activity_dot_enabled: bool,
     socket_path: String,
     process_name: Arc<Mutex<String>>,
     project_dir: String,
@@ -136,6 +139,9 @@ pub fn spawn_status_listener(
                                         .is_ok()
                                 };
                                 if transitioned {
+                                    if activity_dot_enabled {
+                                        has_unread.store(true, Ordering::SeqCst);
+                                    }
                                     crate::process::run_speck_apply_if_present(&project_dir);
                                     let name = process_name.lock().clone();
                                     let _ = Notification::new()

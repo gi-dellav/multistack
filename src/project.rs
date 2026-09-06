@@ -80,6 +80,7 @@ mod tests {
             status: Arc::new(AtomicU8::new(0)),
             active_ms: Arc::new(AtomicU64::new(0)),
             cycle_start: Arc::new(parking_lot::Mutex::new(None)),
+            has_unread: Arc::new(AtomicBool::new(false)),
             status_socket_path: None,
             shutdown_flag: None,
             listener_thread: None,
