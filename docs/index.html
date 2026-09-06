@@ -1,0 +1,570 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#141512">
+<title>multistack — parallel zerostack agents</title>
+<meta name="description" content="Run multiple zerostack agents side by side in your terminal. Spawn, watch, rename, and kill processes from one lightweight Rust TUI; a native, open-source alternative to Conductor">
+<link rel="canonical" href="https://gi-dellav.github.io/multistack/">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://gi-dellav.github.io/multistack/">
+<meta property="og:title" content="multistack — parallel zerostack agents">
+<meta property="og:description" content="Run multiple zerostack agents side by side in your terminal. Spawn, watch, rename, and kill processes from one lightweight Rust TUI; a native, open-source alternative to Conductor">
+<meta property="og:image" content="https://raw.githubusercontent.com/gi-dellav/multistack/main/banner.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="multistack — parallel zerostack agents">
+<meta name="twitter:description" content="Run multiple zerostack agents side by side in your terminal. Spawn, watch, rename, and kill processes from one lightweight Rust TUI; a native, open-source alternative to Conductor">
+<meta name="twitter:image" content="https://raw.githubusercontent.com/gi-dellav/multistack/main/banner.png">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "multistack",
+  "applicationCategory": "DeveloperApplication",
+  "operatingSystem": "Linux, macOS",
+  "description": "Run multiple zerostack agents side by side in your terminal. Spawn, watch, rename, and kill processes from one lightweight Rust TUI; a native, open-source alternative to Conductor",
+  "url": "https://gi-dellav.github.io/multistack/",
+  "downloadUrl": "https://github.com/gi-dellav/multistack/releases",
+  "codeRepository": "https://github.com/gi-dellav/multistack",
+  "license": "https://www.gnu.org/licenses/gpl-3.0.html",
+  "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+  "author": { "@type": "Person", "name": "Giuseppe Della Vedova" }
+}
+</script>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23141512'/%3E%3Crect x='7' y='6' width='18' height='5' rx='2' fill='%23edeade'/%3E%3Crect x='7' y='13.5' width='18' height='5' rx='2' fill='%239fb2ff'/%3E%3Crect x='7' y='21' width='18' height='5' rx='2' fill='%23edeade'/%3E%3C/svg%3E" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;0,8..60,700;1,8..60,400&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --paper:#141512;
+  --surface:#1c1e1a;
+  --ink:#edeade;
+  --body:#c9c5b8;
+  --muted:#a3a097;
+  --faint:#7b786f;
+  --line:#2c2e27;
+  --line-soft:#23251f;
+  --accent:#9fb2ff;
+  --accent-ink:#c6d2ff;
+  --code-bg:#26281f;
+  --code-ink:#d8c690;
+  --pre-bg:#1e201b;
+  --pre-ink:#e8e2d4;
+  --radius:8px;
+}
+html{font-size:16px;scroll-behavior:smooth}
+body{
+  font-family:'Inter',-apple-system,'Segoe UI',sans-serif;
+  background:var(--paper);color:var(--body);
+  line-height:1.75;-webkit-font-smoothing:antialiased;
+}
+::selection{background:var(--accent);color:#141512}
+a{color:var(--accent);text-decoration:none}
+a:hover{color:var(--accent-ink);text-decoration:underline}
+.container{max-width:760px;margin:0 auto;padding:0 28px}
+section{scroll-margin-top:24px}
+
+/* ambient blurred glows */
+.glow{position:fixed;border-radius:50%;pointer-events:none;z-index:0;filter:blur(150px);opacity:.7}
+.glow-a{width:560px;height:560px;top:-220px;left:50%;margin-left:-460px;background:radial-gradient(circle,rgba(159,178,255,.20),transparent 65%)}
+.glow-b{width:640px;height:640px;top:30%;right:-260px;background:radial-gradient(circle,rgba(216,198,144,.10),transparent 65%)}
+.glow-c{width:520px;height:520px;bottom:-200px;left:-180px;background:radial-gradient(circle,rgba(159,178,255,.10),transparent 65%)}
+.progress{position:fixed;top:0;left:0;height:2px;width:100%;z-index:60;transform-origin:0 50%;transform:scaleX(0);background:linear-gradient(90deg,var(--accent),var(--accent-ink));box-shadow:0 0 12px rgba(159,178,255,.7)}
+main,.masthead,.topbar,footer{position:relative;z-index:1}
+
+/* top navigation — frosted glass */
+.topbar{position:sticky;top:0;z-index:50;border-bottom:1px solid var(--line);background:rgba(20,21,18,.55);backdrop-filter:blur(28px) saturate(1.6);-webkit-backdrop-filter:blur(28px) saturate(1.6);transition:background .3s,box-shadow .3s}
+.topbar.scrolled{background:rgba(20,21,18,.88);box-shadow:0 8px 32px rgba(0,0,0,.35)}
+.topbar-inner{display:flex;align-items:center;gap:14px;padding:14px 0;flex-wrap:wrap}
+.brand{display:flex;align-items:center;gap:10px;margin-right:auto;text-decoration:none}
+.brand:hover{text-decoration:none}
+.brand span{font-family:'Source Serif 4',Georgia,serif;font-weight:700;font-size:1.05rem;color:var(--ink)}
+.topbar nav{display:flex;gap:18px;flex-wrap:wrap}
+.topbar nav a{
+  font-size:.72rem;font-weight:600;letter-spacing:.09em;text-transform:uppercase;
+  color:var(--muted);
+}
+.topbar nav a:hover{color:var(--accent);text-decoration:none}
+
+/* title block */
+.masthead{text-align:center;padding:72px 0 40px}
+.eyebrow{
+  font-size:.72rem;font-weight:600;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--faint);margin-bottom:18px;
+}
+.masthead h1{
+  font-family:'Source Serif 4',Georgia,serif;font-weight:700;color:var(--ink);
+  font-size:3rem;letter-spacing:-.02em;line-height:1.1;margin-bottom:16px;
+}
+.standfirst{
+  font-family:'Source Serif 4',Georgia,serif;font-size:1.15rem;line-height:1.6;
+  color:var(--muted);max-width:600px;margin:0 auto 14px;
+}
+.byline{font-size:.85rem;color:var(--faint);margin-bottom:32px}
+.actions{display:flex;gap:12px;justify-content:center;flex-wrap:wrap;margin-bottom:28px}
+.btn{
+  display:inline-block;font-size:.85rem;font-weight:600;
+  padding:10px 22px;border-radius:999px;border:1px solid var(--ink);
+  text-decoration:none;transition:background .15s,color .15s,border-color .15s;
+}
+.btn:hover{text-decoration:none}
+.btn-solid{background:var(--ink);color:#141512}
+.btn-solid:hover{background:var(--accent);border-color:var(--accent);color:#141512}
+.btn-outline{color:var(--ink);background:transparent}
+.btn-outline:hover{border-color:var(--accent);color:var(--accent)}
+
+/* install switcher — glass pills */
+.install-tabs{display:flex;gap:6px;justify-content:center;margin-bottom:10px}
+.install-tabs button{
+  font-family:'Inter',sans-serif;font-size:.72rem;font-weight:600;
+  letter-spacing:.08em;text-transform:uppercase;
+  background:rgba(28,30,26,.55);color:var(--faint);
+  border:1px solid var(--line);border-radius:999px;
+  padding:6px 16px;cursor:pointer;
+  backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);
+  transition:color .2s,border-color .2s,background .2s,box-shadow .2s;
+}
+.install-tabs button:hover{color:var(--ink);border-color:var(--muted);box-shadow:0 4px 18px rgba(0,0,0,.3)}
+.install-tabs button.active{color:#141512;background:var(--ink);border-color:var(--ink);box-shadow:0 4px 20px rgba(159,178,255,.25)}
+.install-box{
+  display:flex;align-items:center;gap:10px;justify-content:space-between;
+  max-width:560px;margin:0 auto;text-align:left;
+  font-family:'JetBrains Mono',monospace;font-size:.78rem;
+  background:rgba(28,30,26,.6);border:1px solid var(--line);border-radius:var(--radius);
+  backdrop-filter:blur(32px) saturate(1.4);-webkit-backdrop-filter:blur(32px) saturate(1.4);
+  box-shadow:0 12px 40px rgba(0,0,0,.35),inset 0 1px 0 rgba(255,255,255,.06);
+  padding:12px 12px 12px 18px;color:var(--pre-ink);
+  transition:box-shadow .3s,border-color .3s;
+}
+.install-box:hover{border-color:rgba(159,178,255,.35);box-shadow:0 12px 44px rgba(0,0,0,.45),0 0 24px rgba(159,178,255,.12)}
+.install-box code{
+  font-family:inherit;font-size:inherit;white-space:nowrap;overflow-x:auto;
+  background:none;border:0;padding:0;color:inherit;
+}
+.install-box .prompt{color:var(--accent);margin-right:8px;user-select:none}
+.copy-btn{
+  flex-shrink:0;font-family:'Inter',sans-serif;font-size:.72rem;font-weight:600;
+  background:transparent;color:var(--muted);border:1px solid var(--line);
+  border-radius:6px;padding:6px 12px;cursor:pointer;transition:color .15s,border-color .15s;
+}
+.copy-btn:hover{color:var(--ink);border-color:var(--muted)}
+
+/* contents */
+.toc{padding:40px 0;border-bottom:1px solid var(--line)}
+.toc-title{
+  font-size:.72rem;font-weight:600;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--faint);margin-bottom:12px;
+}
+.toc ol{
+  list-style:none;columns:2;column-gap:32px;font-size:.88rem;
+}
+.toc li{padding:3px 0;break-inside:avoid}
+.toc li a{color:var(--muted)}
+.toc li a:hover{color:var(--accent)}
+.toc .n{font-family:'JetBrains Mono',monospace;font-size:.78rem;color:var(--faint);margin-right:8px}
+
+/* sections */
+section.block{padding:44px 0;border-bottom:1px solid var(--line)}
+section.block:last-child{border-bottom:0}
+.kicker{
+  font-size:.72rem;font-weight:600;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--faint);margin-bottom:6px;
+}
+h2.title{
+  font-family:'Source Serif 4',Georgia,serif;font-weight:700;color:var(--ink);
+  font-size:1.7rem;letter-spacing:-.01em;margin-bottom:16px;line-height:1.3;
+}
+h2.title .n{color:var(--faint);font-weight:400;margin-right:10px}
+h3.sub{
+  font-family:'Source Serif 4',Georgia,serif;font-weight:600;color:var(--ink);
+  font-size:1.1rem;margin:28px 0 8px;
+}
+p{margin-bottom:14px;font-size:.95rem;color:var(--body)}
+p strong,li strong{color:var(--ink)}
+p.lede{font-family:'Source Serif 4',Georgia,serif;font-size:1.08rem;color:var(--body)}
+
+/* figure */
+figure{margin:28px 0;background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden}
+figure img{display:block;width:100%;height:auto}
+figcaption{
+  font-size:.78rem;color:var(--muted);text-align:center;
+  padding:12px 20px;border-top:1px solid var(--line-soft);
+}
+
+/* feature grid */
+.feat-grid{display:grid;grid-template-columns:1fr 1fr;gap:0 32px;margin:20px 0;list-style:none}
+.feat-grid li{
+  font-size:.87rem;padding:9px 0;border-bottom:1px solid var(--line-soft);
+  color:var(--body);
+}
+.feat-grid li strong{font-weight:600;color:var(--ink)}
+
+/* tables (booktabs) */
+table{width:100%;border-collapse:collapse;margin:18px 0;font-size:.87rem}
+thead th{
+  font-size:.72rem;font-weight:600;letter-spacing:.08em;text-transform:uppercase;
+  color:var(--muted);text-align:left;padding:10px 12px;border-bottom:1px solid var(--ink);
+}
+table.booktabs{border-top:2px solid var(--ink);border-bottom:1px solid var(--ink)}
+table.booktabs td{padding:9px 12px;border-bottom:1px solid var(--line-soft);color:var(--body)}
+table.booktabs tr:last-child td{border-bottom:0}
+table.booktabs td strong,table.booktabs td code{color:var(--ink)}
+
+/* commands */
+.cmd-grid{display:grid;grid-template-columns:1fr 1fr;gap:0 32px;margin-top:16px}
+.cmd{padding:9px 0;border-bottom:1px solid var(--line-soft);font-size:.87rem}
+.cmd strong{font-weight:600;color:var(--ink);font-family:'JetBrains Mono',monospace;font-size:.82rem}
+.cmd span{color:var(--muted)}
+
+/* docs list */
+.doc-list{list-style:none;margin:16px 0}
+.doc-list li{font-size:.9rem;padding:9px 0;border-bottom:1px solid var(--line-soft)}
+.doc-list li:last-child{border-bottom:0}
+.doc-list a{font-family:'JetBrains Mono',monospace;font-size:.82rem}
+.doc-list span{color:var(--muted)}
+
+/* providers */
+.prov-list{list-style:none;margin:16px 0}
+.prov-list li{font-size:.9rem;padding:9px 0 9px 18px;position:relative;border-bottom:1px solid var(--line-soft)}
+.prov-list li:last-child{border-bottom:0}
+.prov-list li::before{content:'—';position:absolute;left:0;color:var(--faint)}
+.prov-list li strong{color:var(--ink)}
+
+/* code */
+code{
+  font-family:'JetBrains Mono',monospace;font-size:.82em;
+  background:var(--code-bg);border-radius:4px;padding:1px 6px;color:var(--code-ink);
+}
+pre{
+  background:var(--pre-bg);color:var(--pre-ink);border:1px solid var(--line);
+  border-radius:var(--radius);
+  padding:18px 20px;overflow-x:auto;margin:16px 0;line-height:1.65;
+}
+pre code{background:none;border:0;padding:0;color:inherit;font-size:.8rem}
+
+/* note */
+.note{
+  font-size:.85rem;color:var(--muted);background:var(--surface);
+  border:1px solid var(--line);border-left:3px solid var(--accent);
+  border-radius:0 var(--radius) var(--radius) 0;
+  padding:12px 16px;margin:18px 0;
+}
+.note code{color:var(--code-ink)}
+
+/* scroll reveal */
+.reveal{opacity:0;transform:translateY(20px);filter:blur(10px);transition:opacity .45s cubic-bezier(.22,1,.36,1),transform .45s cubic-bezier(.22,1,.36,1),filter .45s cubic-bezier(.22,1,.36,1)}
+.reveal.visible{opacity:1;transform:none;filter:blur(0)}
+.reveal-child{opacity:0;transform:translateY(14px);filter:blur(8px);transition:opacity .35s cubic-bezier(.22,1,.36,1),transform .35s cubic-bezier(.22,1,.36,1),filter .35s cubic-bezier(.22,1,.36,1)}
+.reveal.visible .reveal-child{opacity:1;transform:none;filter:blur(0)}
+.reveal.visible .reveal-child:nth-child(1){transition-delay:.03s}
+.reveal.visible .reveal-child:nth-child(2){transition-delay:.06s}
+.reveal.visible .reveal-child:nth-child(3){transition-delay:.09s}
+.reveal.visible .reveal-child:nth-child(4){transition-delay:.12s}
+.reveal.visible .reveal-child:nth-child(5){transition-delay:.15s}
+.reveal.visible .reveal-child:nth-child(6){transition-delay:.18s}
+.reveal.visible .reveal-child:nth-child(7){transition-delay:.21s}
+.reveal.visible .reveal-child:nth-child(8){transition-delay:.24s}
+.reveal.visible .reveal-child:nth-child(n+9){transition-delay:.27s}
+
+/* footer */
+footer{padding:40px 0 48px;text-align:center;font-size:.8rem;color:var(--faint)}
+footer .rule{max-width:760px;margin:0 auto 24px;border-top:1px solid var(--line)}
+footer p{margin-bottom:6px;font-size:.8rem;color:var(--faint)}
+
+@media(max-width:640px){
+  .glow{opacity:.35}
+  .masthead{padding:52px 0 32px}
+  .masthead h1{font-size:2.2rem}
+  .standfirst{font-size:1.02rem}
+  .toc ol{columns:1}
+  .feat-grid,.cmd-grid{grid-template-columns:1fr}
+  h2.title{font-size:1.45rem}
+  .install-box{font-size:.7rem}
+}
+/* reduced motion */
+@media(prefers-reduced-motion:reduce){
+  .reveal,.reveal-child{opacity:1;transform:none;filter:none;transition:none}
+  html{scroll-behavior:auto}
+}
+</style>
+</head>
+<body>
+
+<div class="glow glow-a" aria-hidden="true"></div>
+<div class="glow glow-b" aria-hidden="true"></div>
+<div class="glow glow-c" aria-hidden="true"></div>
+<div class="progress" id="progress" aria-hidden="true"></div>
+
+<div class="topbar" id="topbar">
+  <div class="container topbar-inner">
+    <a class="brand" href="./">
+      <span>multistack</span>
+    </a>
+    <nav>
+      <a href="#overview">Overview</a>
+      <a href="#keybindings">Keybindings</a>
+      <a href="#quickstart">Quick Start</a>
+      <a href="https://github.com/gi-dellav/multistack" target="_blank" rel="noopener">GitHub</a>
+    </nav>
+  </div>
+</div>
+
+<header class="masthead">
+  <div class="container">
+    <div class="eyebrow">Rust &middot; Terminal &middot; Open Source</div>
+    <h1>multistack</h1>
+    <p class="standfirst">Run multiple zerostack agents side by side in your terminal. Spawn, watch, rename, and kill processes from one lightweight TUI; a native, open-source alternative to Conductor</p>
+    <div class="byline">by <a href="https://github.com/gi-dellav" target="_blank" rel="noopener">Giuseppe Della Vedova</a></div>
+    <div class="actions">
+      <a class="btn btn-solid" href="https://github.com/gi-dellav/multistack" target="_blank" rel="noopener">GitHub</a>
+      <a class="btn btn-outline" href="#quickstart">Quick Start</a>
+    </div>
+    <div class="install-tabs" role="tablist" aria-label="Install method">
+      <button type="button" data-tab="brew" class="active" role="tab" aria-selected="true">Homebrew</button>
+      <button type="button" data-tab="curl" role="tab" aria-selected="false">Curl</button>
+      <button type="button" data-tab="cargo" role="tab" aria-selected="false">Cargo</button>
+    </div>
+    <div class="install-box">
+      <code id="install-snippet"><span class="prompt">$</span>brew tap gi-dellav/tap &amp;&amp; brew install multistack</code>
+      <button type="button" class="copy-btn" id="copy-install">Copy</button>
+    </div>
+  </div>
+</header>
+
+<main class="container">
+
+  <nav class="toc reveal" aria-label="Contents">
+    <div class="toc-title">Contents</div>
+    <ol>
+      <li><a href="#overview"><span class="n">1</span>Overview</a></li>
+      <li><a href="#status"><span class="n">2</span>Live Status</a></li>
+      <li><a href="#keybindings"><span class="n">3</span>Keybindings</a></li>
+      <li><a href="#docs"><span class="n">4</span>Documentation</a></li>
+      <li><a href="#quickstart"><span class="n">5</span>Quick Start</a></li>
+      <li><a href="#requirements"><span class="n">6</span>Requirements</a></li>
+      <li><a href="#license"><span class="n">7</span>License</a></li>
+    </ol>
+  </nav>
+
+  <!-- 1 overview -->
+  <section class="block reveal" id="overview">
+    <div class="kicker">Section 1</div>
+    <h2 class="title"><span class="n">1.</span>Overview</h2>
+    <ul class="feat-grid stagger">
+      <li><strong>Parallel agents</strong> &mdash; each one gets its own PTY, running <code>zerostack --parallel</code> under the hood</li>
+      <li><strong>Live status tracking</strong> &mdash; see at a glance who&rsquo;s working <code>[~]</code>, done <code>[✓]</code>, dead <code>[X]</code>, or waiting <code>[ ]</code>, with per-agent timers</li>
+      <li><strong>Drop into any agent</strong> &mdash; hit Enter to see its full terminal output, keystrokes pass straight through</li>
+      <li><strong>Status signals</strong> &mdash; listens for <code>start</code>/<code>stop</code> over Unix sockets, so timers stay accurate across headless loop iterations</li>
+      <li><strong>Git worktree per agent</strong> &mdash; branch-per-task workflow, spawned with a single keypress</li>
+      <li><strong>Projects</strong> &mdash; group agents by directory, jump between headers with PageUp/PageDown</li>
+      <li><strong>lazygit &amp; shell</strong> &mdash; open <code>lazygit</code> or <code>$SHELL</code> in the agent worktree without leaving the TUI</li>
+      <li><strong>Desktop notifications</strong> &mdash; finished agents and git conflicts notify you even when you look away</li>
+    </ul>
+    <figure>
+      <img src="https://raw.githubusercontent.com/gi-dellav/multistack/main/banner.png" alt="multistack banner">
+      <figcaption>Figure 1 &mdash; multistack, running parallel zerostack agents.</figcaption>
+    </figure>
+  </section>
+
+  <!-- 2 live status -->
+  <section class="block reveal" id="status">
+    <div class="kicker">Section 2</div>
+    <h2 class="title"><span class="n">2.</span>Live Status</h2>
+    <p>Every agent reports its lifecycle over a Unix socket &mdash; the list stays accurate even while agents iterate headlessly:</p>
+    <table class="booktabs">
+      <thead><tr><th>Indicator</th><th>State</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td><code>[ ]</code></td><td><strong>waiting</strong></td><td>Spawned, no work observed yet</td></tr>
+        <tr><td><code>[~]</code></td><td><strong>working</strong></td><td>Agent is running &mdash; the timer accrues</td></tr>
+        <tr><td><code>[✓]</code></td><td><strong>finished</strong></td><td>Agent completed &mdash; desktop notification fired</td></tr>
+        <tr><td><code>[X]</code></td><td><strong>dead</strong></td><td>Process exited</td></tr>
+        <tr><td><code>[!]</code></td><td><strong>git-conflict</strong></td><td>Needs your attention &mdash; resolve the git conflict</td></tr>
+      </tbody>
+    </table>
+    <p>Timers freeze the moment an agent stops or conflicts, so the displayed time is time actually worked. Press <code>Esc</code> twice to quit while conflicts are pending.</p>
+  </section>
+
+  <!-- 3 keybindings -->
+  <section class="block reveal" id="keybindings">
+    <div class="kicker">Section 3</div>
+    <h2 class="title"><span class="n">3.</span>Keybindings</h2>
+    <h3 class="sub">Agent list (normal mode)</h3>
+    <table class="booktabs">
+      <thead><tr><th>Key</th><th>Action</th></tr></thead>
+      <tbody>
+        <tr><td><code>n</code></td><td>Spawn new agent &mdash; prompts for a name, creates a git worktree</td></tr>
+        <tr><td><code>N</code></td><td>Spawn new agent in parallel mode &mdash; no prompt, jumps straight to TTY</td></tr>
+        <tr><td><code>m</code></td><td>Spawn bare agent &mdash; no worktree, no <code>--parallel</code>, jumps to TTY</td></tr>
+        <tr><td><code>p</code></td><td>Add project &mdash; opens directory picker</td></tr>
+        <tr><td><code>l</code></td><td>Remove project and all its agents</td></tr>
+        <tr><td><code>h</code></td><td>Open <code>lazygit</code> in the project (or agent worktree) directory</td></tr>
+        <tr><td><code>s</code></td><td>Open <code>$SHELL</code> in the project (or agent worktree) directory</td></tr>
+        <tr><td><code>r</code></td><td>Rename selected agent</td></tr>
+        <tr><td><code>d</code></td><td>Delete (kill) selected agent</td></tr>
+        <tr><td><code>Enter</code></td><td>Drop into the selected agent&rsquo;s TTY</td></tr>
+        <tr><td><code>&uarr;</code> / <code>&darr;</code></td><td>Move selection</td></tr>
+        <tr><td><code>PgUp</code> / <code>PgDn</code></td><td>Jump to previous / next project header</td></tr>
+        <tr><td><code>q</code> / <code>Esc</code></td><td>Quit (Esc twice if agents have git conflicts)</td></tr>
+      </tbody>
+    </table>
+    <h3 class="sub">TTY view (agent / lazygit / shell)</h3>
+    <div class="cmd-grid stagger">
+      <div class="cmd"><strong>Esc</strong> <span>&mdash; Return to agent list</span></div>
+      <div class="cmd"><strong>all other keys</strong> <span>&mdash; Forwarded to the underlying process</span></div>
+    </div>
+    <h3 class="sub">Prompt (new agent / rename / new project)</h3>
+    <div class="cmd-grid stagger">
+      <div class="cmd"><strong>Enter</strong> <span>&mdash; Confirm</span></div>
+      <div class="cmd"><strong>Esc</strong> <span>&mdash; Cancel</span></div>
+      <div class="cmd"><strong>Backspace</strong> <span>&mdash; Delete last character</span></div>
+      <div class="cmd"><strong>printable chars</strong> <span>&mdash; Append to input</span></div>
+    </div>
+    <h3 class="sub">Directory picker</h3>
+    <div class="cmd-grid stagger">
+      <div class="cmd"><strong>Enter</strong> <span>&mdash; Add selected directory as a project</span></div>
+      <div class="cmd"><strong>Esc</strong> <span>&mdash; Cancel, return to agent list</span></div>
+      <div class="cmd"><strong>/</strong> <span>&mdash; Filter directories (type to narrow, Esc to clear)</span></div>
+      <div class="cmd"><strong>all other keys</strong> <span>&mdash; Navigate the file tree</span></div>
+    </div>
+  </section>
+
+  <!-- 4 documentation -->
+  <section class="block reveal" id="docs">
+    <div class="kicker">Section 4</div>
+    <h2 class="title"><span class="n">4.</span>Documentation</h2>
+    <ul class="doc-list">
+      <li><a href="https://github.com/gi-dellav/multistack/blob/main/README.md" target="_blank" rel="noopener">README.md</a> <span>&mdash; Installation, keybindings, and requirements</span></li>
+      <li><a href="https://github.com/gi-dellav/multistack/blob/main/ARCHITECTURE.md" target="_blank" rel="noopener">ARCHITECTURE.md</a> <span>&mdash; Project architecture and design decisions</span></li>
+      <li><a href="https://github.com/gi-dellav/multistack/blob/main/STATUS_SIGNAL.md" target="_blank" rel="noopener">STATUS_SIGNAL.md</a> <span>&mdash; Agent&leftrightarrow;UI status socket protocol</span></li>
+    </ul>
+  </section>
+
+  <!-- 5 quickstart -->
+  <section class="block reveal" id="quickstart">
+    <div class="kicker">Section 5</div>
+    <h2 class="title"><span class="n">5.</span>Quick Start</h2>
+    <pre><code># Homebrew (recommended — zerostack installed automatically)
+brew tap gi-dellav/tap
+brew trust gi-dellav/tap   # required for Homebrew 6.0.0+
+brew install multistack
+
+# Launch the TUI
+multistack
+
+# p — add your project, n — spawn an agent,
+# Enter — drop into its TTY, Esc — back to the list</code></pre>
+    <div class="note">You need <a href="https://gi-dellav.github.io/zerostack/" target="_blank" rel="noopener">zerostack</a> on your <code>PATH</code>, plus a recent Rust toolchain.</div>
+  </section>
+
+  <!-- 6 requirements -->
+  <section class="block reveal" id="requirements">
+    <div class="kicker">Section 6</div>
+    <h2 class="title"><span class="n">6.</span>Requirements</h2>
+    <ul class="prov-list">
+      <li><strong>Linux / BSD / macOS</strong> &mdash; uses Unix domain sockets and PTYs</li>
+      <li><strong>zerostack v1.5+</strong> &mdash; built with the <code>status-signals</code> feature (default from v1.5)</li>
+      <li><strong>Rust 1.85+</strong> &mdash; 2024 edition</li>
+    </ul>
+  </section>
+
+  <!-- 7 license -->
+  <section class="block reveal" id="license">
+    <div class="kicker">Section 7</div>
+    <h2 class="title"><span class="n">7.</span>License</h2>
+    <p><a href="https://github.com/gi-dellav/multistack/blob/main/LICENSE" target="_blank" rel="noopener">GPL-3.0-only</a></p>
+  </section>
+
+</main>
+
+<footer>
+  <div class="rule container"></div>
+  <div class="container">
+    <p>multistack &mdash; by <a href="https://github.com/gi-dellav" target="_blank" rel="noopener">Giuseppe Della Vedova</a></p>
+    <p>Built for <a href="https://gi-dellav.github.io/zerostack/" target="_blank" rel="noopener">zerostack</a></p>
+  </div>
+</footer>
+
+<script>
+(function(){
+  var snippets = {
+    brew: 'brew tap gi-dellav/tap && brew install multistack',
+    curl: 'curl -fsSL https://raw.githubusercontent.com/gi-dellav/multistack/main/install.sh | bash',
+    cargo: 'cargo install multistack'
+  };
+  var box = document.getElementById('install-snippet');
+  var copyBtn = document.getElementById('copy-install');
+  var tabs = document.querySelectorAll('.install-tabs button');
+  function render(key){
+    box.innerHTML = '';
+    var p = document.createElement('span');
+    p.className = 'prompt';
+    p.textContent = '$';
+    var t = document.createElement('span');
+    t.textContent = snippets[key];
+    box.appendChild(p);
+    box.appendChild(t);
+  }
+  tabs.forEach(function(btn){
+    btn.addEventListener('click', function(){
+      tabs.forEach(function(b){ b.classList.remove('active'); b.setAttribute('aria-selected','false'); });
+      btn.classList.add('active');
+      btn.setAttribute('aria-selected','true');
+      render(btn.getAttribute('data-tab'));
+    });
+  });
+  copyBtn.addEventListener('click', function(){
+    var active = document.querySelector('.install-tabs button.active');
+    var key = active ? active.getAttribute('data-tab') : 'brew';
+    var text = snippets[key];
+    function done(){ copyBtn.textContent = 'Copied'; setTimeout(function(){ copyBtn.textContent = 'Copy'; }, 1500); }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done, done);
+    } else {
+      var ta = document.createElement('textarea');
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand('copy'); } catch (e) {}
+      document.body.removeChild(ta);
+      done();
+    }
+  });
+
+  /* sticky nav shadow */
+  var topbar = document.getElementById('topbar');
+  var progress = document.getElementById('progress');
+  function onScroll(){
+    var y = window.scrollY || document.documentElement.scrollTop;
+    topbar.classList.toggle('scrolled', y > 8);
+    var h = document.documentElement.scrollHeight - window.innerHeight;
+    progress.style.transform = 'scaleX(' + (h > 0 ? Math.min(y / h, 1) : 0) + ')';
+  }
+  window.addEventListener('scroll', onScroll, {passive:true});
+  onScroll();
+
+  /* scroll reveal */
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var targets = document.querySelectorAll('.reveal');
+  // stagger children of feature / command grids
+  document.querySelectorAll('.stagger').forEach(function(grid){
+    grid.querySelectorAll(':scope > *').forEach(function(el){ el.classList.add('reveal-child'); });
+  });
+  if (reduce || !('IntersectionObserver' in window)) {
+    targets.forEach(function(el){ el.classList.add('visible'); });
+  } else {
+    var io = new IntersectionObserver(function(entries){
+      entries.forEach(function(e){
+        if (e.isIntersecting) { e.target.classList.add('visible'); io.unobserve(e.target); }
+      });
+    }, {threshold:.12, rootMargin:'0px 0px -8% 0px'});
+    targets.forEach(function(el){ io.observe(el); });
+  }
+})();
+</script>
+
+</body>
+</html>
