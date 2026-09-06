@@ -255,6 +255,19 @@ pre code{background:none;border:0;padding:0;color:inherit;font-size:.8rem}
 }
 .note code{color:var(--code-ink)}
 
+/* project card */
+.proj-card{
+  display:block;border:1px solid var(--line);border-radius:12px;
+  padding:22px 24px;margin:18px 0;background:rgba(28,30,26,.5);
+  backdrop-filter:blur(28px) saturate(1.3);-webkit-backdrop-filter:blur(28px) saturate(1.3);
+  box-shadow:0 16px 48px rgba(0,0,0,.3);
+  transition:border-color .2s,box-shadow .2s;
+}
+.proj-card:hover{text-decoration:none;border-color:rgba(159,178,255,.4);box-shadow:0 16px 48px rgba(0,0,0,.35),0 0 24px rgba(159,178,255,.10)}
+.proj-card strong{display:block;font-family:'Source Serif 4',Georgia,serif;font-size:1.25rem;color:var(--ink);margin-bottom:4px}
+.proj-card .proj-tag{display:block;font-size:.92rem;color:var(--body);margin-bottom:6px}
+.proj-card .proj-meta{display:block;font-size:.78rem;color:var(--faint)}
+
 /* scroll reveal */
 .reveal{opacity:0;transform:translateY(20px);filter:blur(10px);transition:opacity .45s cubic-bezier(.22,1,.36,1),transform .45s cubic-bezier(.22,1,.36,1),filter .45s cubic-bezier(.22,1,.36,1)}
 .reveal.visible{opacity:1;transform:none;filter:blur(0)}
@@ -341,12 +354,13 @@ footer p{margin-bottom:6px;font-size:.8rem;color:var(--faint)}
     <div class="toc-title">Contents</div>
     <ol>
       <li><a href="#overview"><span class="n">1</span>Overview</a></li>
-      <li><a href="#status"><span class="n">2</span>Live Status</a></li>
-      <li><a href="#keybindings"><span class="n">3</span>Keybindings</a></li>
-      <li><a href="#docs"><span class="n">4</span>Documentation</a></li>
-      <li><a href="#quickstart"><span class="n">5</span>Quick Start</a></li>
-      <li><a href="#requirements"><span class="n">6</span>Requirements</a></li>
-      <li><a href="#license"><span class="n">7</span>License</a></li>
+      <li><a href="#other-projects"><span class="n">2</span>Other Projects</a></li>
+      <li><a href="#status"><span class="n">3</span>Live Status</a></li>
+      <li><a href="#keybindings"><span class="n">4</span>Keybindings</a></li>
+      <li><a href="#docs"><span class="n">5</span>Documentation</a></li>
+      <li><a href="#quickstart"><span class="n">6</span>Quick Start</a></li>
+      <li><a href="#requirements"><span class="n">7</span>Requirements</a></li>
+      <li><a href="#license"><span class="n">8</span>License</a></li>
     </ol>
   </nav>
 
@@ -370,10 +384,22 @@ footer p{margin-bottom:6px;font-size:.8rem;color:var(--faint)}
     </figure>
   </section>
 
-  <!-- 2 live status -->
-  <section class="block reveal" id="status">
+  <!-- 2 other projects -->
+  <section class="block reveal" id="other-projects">
     <div class="kicker">Section 2</div>
-    <h2 class="title"><span class="n">2.</span>Live Status</h2>
+    <h2 class="title"><span class="n">2.</span>Other Projects</h2>
+    <p class="lede">From the same author &mdash; the agent that multistack manages:</p>
+    <a class="proj-card" href="https://gi-dellav.github.io/zerostack/" target="_blank" rel="noopener">
+      <strong>zerostack &rarr;</strong>
+      <span class="proj-tag">Minimal AI coding agent for the terminal, written in Rust</span>
+      <span class="proj-meta">Sandboxed execution &middot; granular permissions &middot; MCP support &middot; session rewind</span>
+    </a>
+  </section>
+
+  <!-- 3 live status -->
+  <section class="block reveal" id="status">
+    <div class="kicker">Section 3</div>
+    <h2 class="title"><span class="n">3.</span>Live Status</h2>
     <p>Every agent reports its lifecycle over a Unix socket &mdash; the list stays accurate even while agents iterate headlessly:</p>
     <table class="booktabs">
       <thead><tr><th>Indicator</th><th>State</th><th>Meaning</th></tr></thead>
@@ -388,10 +414,10 @@ footer p{margin-bottom:6px;font-size:.8rem;color:var(--faint)}
     <p>Timers freeze the moment an agent stops or conflicts, so the displayed time is time actually worked. Press <code>Esc</code> twice to quit while conflicts are pending.</p>
   </section>
 
-  <!-- 3 keybindings -->
+  <!-- 4 keybindings -->
   <section class="block reveal" id="keybindings">
-    <div class="kicker">Section 3</div>
-    <h2 class="title"><span class="n">3.</span>Keybindings</h2>
+    <div class="kicker">Section 4</div>
+    <h2 class="title"><span class="n">4.</span>Keybindings</h2>
     <h3 class="sub">Agent list (normal mode)</h3>
     <table class="booktabs">
       <thead><tr><th>Key</th><th>Action</th></tr></thead>
@@ -432,10 +458,10 @@ footer p{margin-bottom:6px;font-size:.8rem;color:var(--faint)}
     </div>
   </section>
 
-  <!-- 4 documentation -->
+  <!-- 5 documentation -->
   <section class="block reveal" id="docs">
-    <div class="kicker">Section 4</div>
-    <h2 class="title"><span class="n">4.</span>Documentation</h2>
+    <div class="kicker">Section 5</div>
+    <h2 class="title"><span class="n">5.</span>Documentation</h2>
     <ul class="doc-list">
       <li><a href="https://github.com/gi-dellav/multistack/blob/main/README.md" target="_blank" rel="noopener">README.md</a> <span>&mdash; Installation, keybindings, and requirements</span></li>
       <li><a href="https://github.com/gi-dellav/multistack/blob/main/ARCHITECTURE.md" target="_blank" rel="noopener">ARCHITECTURE.md</a> <span>&mdash; Project architecture and design decisions</span></li>
@@ -443,10 +469,10 @@ footer p{margin-bottom:6px;font-size:.8rem;color:var(--faint)}
     </ul>
   </section>
 
-  <!-- 5 quickstart -->
+  <!-- 6 quickstart -->
   <section class="block reveal" id="quickstart">
-    <div class="kicker">Section 5</div>
-    <h2 class="title"><span class="n">5.</span>Quick Start</h2>
+    <div class="kicker">Section 6</div>
+    <h2 class="title"><span class="n">6.</span>Quick Start</h2>
     <pre><code># Homebrew (recommended — zerostack installed automatically)
 brew tap gi-dellav/tap
 brew trust gi-dellav/tap   # required for Homebrew 6.0.0+
@@ -460,10 +486,10 @@ multistack
     <div class="note">You need <a href="https://gi-dellav.github.io/zerostack/" target="_blank" rel="noopener">zerostack</a> on your <code>PATH</code>, plus a recent Rust toolchain.</div>
   </section>
 
-  <!-- 6 requirements -->
+  <!-- 7 requirements -->
   <section class="block reveal" id="requirements">
-    <div class="kicker">Section 6</div>
-    <h2 class="title"><span class="n">6.</span>Requirements</h2>
+    <div class="kicker">Section 7</div>
+    <h2 class="title"><span class="n">7.</span>Requirements</h2>
     <ul class="prov-list">
       <li><strong>Linux / BSD / macOS</strong> &mdash; uses Unix domain sockets and PTYs</li>
       <li><strong>zerostack v1.5+</strong> &mdash; built with the <code>status-signals</code> feature (default from v1.5)</li>
@@ -471,10 +497,10 @@ multistack
     </ul>
   </section>
 
-  <!-- 7 license -->
+  <!-- 8 license -->
   <section class="block reveal" id="license">
-    <div class="kicker">Section 7</div>
-    <h2 class="title"><span class="n">7.</span>License</h2>
+    <div class="kicker">Section 8</div>
+    <h2 class="title"><span class="n">8.</span>License</h2>
     <p><a href="https://github.com/gi-dellav/multistack/blob/main/LICENSE" target="_blank" rel="noopener">GPL-3.0-only</a></p>
   </section>
 
