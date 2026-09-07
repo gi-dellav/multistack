@@ -547,6 +547,7 @@ pub fn welcome_content(no_worktree: bool) -> Vec<Line<'static>> {
         key_line("n / N / m", "spawn agent (worktree / parallel / bare)"),
         key_line("Enter", "drop into agent TTY (Esc returns to list)"),
         key_line("d", "kill selected agent"),
+        key_line("c", "open zerostack setup wizard (Esc returns to list)"),
         key_line("?", "full keybinding reference (page 2/2)"),
         key_line("q", "quit (asks for confirmation when needed)"),
         Line::from(""),
@@ -616,6 +617,10 @@ pub fn help_content(no_worktree: bool) -> Vec<Line<'static>> {
         section_header("TOOLS (open in project or agent worktree)"),
         key_line("h", "open lazygit (Esc returns to list)"),
         key_line("s", "open $SHELL (Esc returns to list)"),
+        key_line(
+            "c",
+            "open zerostack setup wizard (in project dir, Esc returns)",
+        ),
         Line::from(""),
         section_header("NAVIGATE LIST"),
         key_line("↑ / ↓", "move selection"),

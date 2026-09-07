@@ -492,6 +492,36 @@ fn process_key(
                         }
                     }
                 }
+                KeyCode::Char('c') => {
+                    if let Some(project_id) = resolve_project(entries, projects, *selected)
+                        && let Some(dir) = find_project_dir(projects, project_id)
+                    {
+                        match spawn_pty(
+                            pty_system,
+                            "zerostack",
+                            &["--setup"],
+                            None,
+                            term_rows,
+                            term_cols,
+                            &dir,
+                        ) {
+                            Ok(mut process) => {
+                                process.kill_on_drop = true;
+                                process.project_dir = dir.clone();
+                                *mode = Mode::TempTty {
+                                    process: Box::new(process),
+                                    previous_selected: *selected,
+                                };
+                            }
+                            Err(e) => {
+                                let _ = notify_rust::Notification::new()
+                                    .summary("Failed to launch setup")
+                                    .body(&format!("{e}"))
+                                    .show();
+                            }
+                        }
+                    }
+                }
                 KeyCode::Char('r') => {
                     if is_agent(entries, *selected)
                         && let ListEntry::Agent(proc_id) = entries[*selected]
