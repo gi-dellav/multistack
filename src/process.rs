@@ -439,46 +439,62 @@ pub fn sync_statuses(processes: &mut [Process]) {
         if p.alive.load(Ordering::SeqCst) {
             continue;
         }
-        let status = p.status.load(Ordering::SeqCst);
-        // Anything that never reported `stop` still holds an open cycle;
-        // credit it before freezing the timer so elapsed time isn't lost.
-        // NOT_YET (never started) means "dead on arrival" -> [X].
-        if status == status::STATUS_WORKING
-            || status == status::STATUS_NOT_YET
-            || status == status::STATUS_GIT_CONFLICT
-        {
-            if let Some(start) = p.cycle_start.lock().take() {
+        // Read the status, credit the cycle and store DEAD while holding
+        // the timer lock: the listener installs a new cycle under that same
+        // lock, so this keeps a `start` or `state:working` from landing a
+        // running timer on a process we have just marked dead, one that
+        // every later sync skips while the panel counts up forever. The
+        // guard is dropped before any hook run or notification below.
+        let newly_dead = {
+            let mut cycle = p.cycle_start.lock();
+            let status = p.status.load(Ordering::SeqCst);
+            // Anything that never reported `stop` still holds an open cycle;
+            // credit it before freezing the timer so elapsed time isn't lost.
+            // NOT_YET (never started) means "dead on arrival" -> [X].
+            // BLOCKED means the agent died on its permission prompt: the
+            // prompt died with it, so there is nothing left for the user to
+            // answer and the panel must not stay at [?]. A git conflict
+            // outlives the process (the worktree still needs resolving), so
+            // it keeps its [!].
+            let handled = status == status::STATUS_WORKING
+                || status == status::STATUS_NOT_YET
+                || status == status::STATUS_BLOCKED
+                || status == status::STATUS_GIT_CONFLICT;
+            if handled && let Some(start) = cycle.take() {
                 let elapsed = start.elapsed();
                 p.active_ms
                     .fetch_add(elapsed.as_millis() as u64, Ordering::SeqCst);
             }
-            if status != status::STATUS_GIT_CONFLICT {
+            if handled && status != status::STATUS_GIT_CONFLICT {
                 p.status.store(status::STATUS_DEAD, Ordering::SeqCst);
+                true
+            } else {
+                false
             }
-            if status == status::STATUS_GIT_CONFLICT {
-                continue;
-            }
-            run_speck_apply_if_present(&p.project_dir);
-            if p.worktree_dir
-                .as_deref()
-                .is_some_and(|d| d != p.project_dir)
-            {
-                run_speck_apply_if_present(&p.effective_dir());
-            }
-            #[cfg(not(test))]
-            {
-                if failed(p) {
-                    let reason = exit_reason(p).unwrap_or_else(|| "failed".to_string());
-                    let _ = Notification::new()
-                        .summary("Agent failed")
-                        .body(&format!("{} {reason}", &p.name))
-                        .show();
-                } else {
-                    let _ = Notification::new()
-                        .summary("Agent died")
-                        .body(&format!("{} has terminated unexpectedly", &p.name))
-                        .show();
-                }
+        };
+        if !newly_dead {
+            continue;
+        }
+        run_speck_apply_if_present(&p.project_dir);
+        if p.worktree_dir
+            .as_deref()
+            .is_some_and(|d| d != p.project_dir)
+        {
+            run_speck_apply_if_present(&p.effective_dir());
+        }
+        #[cfg(not(test))]
+        {
+            if failed(p) {
+                let reason = exit_reason(p).unwrap_or_else(|| "failed".to_string());
+                let _ = Notification::new()
+                    .summary("Agent failed")
+                    .body(&format!("{} {reason}", &p.name))
+                    .show();
+            } else {
+                let _ = Notification::new()
+                    .summary("Agent died")
+                    .body(&format!("{} has terminated unexpectedly", &p.name))
+                    .show();
             }
         }
     }
@@ -569,6 +585,22 @@ mod tests {
         let mut p = make_test_process(false, status::STATUS_GIT_CONFLICT, 10000, false);
         sync_statuses(std::slice::from_mut(&mut p));
         assert_eq!(p.status.load(Ordering::SeqCst), status::STATUS_GIT_CONFLICT);
+        assert_eq!(p.active_ms.load(Ordering::SeqCst), 10000);
+        assert!(p.cycle_start.lock().is_none());
+    }
+
+    #[test]
+    fn test_sync_statuses_blocked_alive_unchanged() {
+        let mut p = make_test_process(true, status::STATUS_BLOCKED, 5000, false);
+        sync_statuses(std::slice::from_mut(&mut p));
+        assert_eq!(p.status.load(Ordering::SeqCst), status::STATUS_BLOCKED);
+    }
+
+    #[test]
+    fn test_sync_statuses_blocked_dead_marks_dead() {
+        let mut p = make_test_process(false, status::STATUS_BLOCKED, 10000, false);
+        sync_statuses(std::slice::from_mut(&mut p));
+        assert_eq!(p.status.load(Ordering::SeqCst), status::STATUS_DEAD);
         assert_eq!(p.active_ms.load(Ordering::SeqCst), 10000);
         assert!(p.cycle_start.lock().is_none());
     }

@@ -645,6 +645,10 @@ pub fn help_content(no_worktree: bool) -> Vec<Line<'static>> {
         key_line("[✓] green", "finished (stop signal received)"),
         key_line("[X] red", "dead — process exited"),
         key_line("[!] magenta", "git conflict — resolve it, quit asks twice"),
+        key_line(
+            "[?] cyan",
+            "waiting for you — answer the prompt in the agent",
+        ),
         key_line("● yellow", "unread — agent finished, Enter clears it"),
         Line::from(Span::styled(
             "  Timer shows active working time, kept accurate via status socket.".to_string(),
@@ -739,9 +743,11 @@ fn render_help_overlay(
     frame.render_widget(hint.centered(), footer_area);
 }
 
-fn quit_counts(processes: &[Process]) -> (usize, usize, usize, usize, usize, usize, usize) {
+/// `(total, running, working, waiting, blocked, finished, dead, conflict)`.
+fn quit_counts(processes: &[Process]) -> (usize, usize, usize, usize, usize, usize, usize, usize) {
     let mut working = 0;
     let mut waiting = 0;
+    let mut blocked = 0;
     let mut finished = 0;
     let mut dead = 0;
     let mut conflict = 0;
@@ -753,6 +759,9 @@ fn quit_counts(processes: &[Process]) -> (usize, usize, usize, usize, usize, usi
         match p.status.load(Ordering::SeqCst) {
             status::STATUS_WORKING => working += 1,
             status::STATUS_NOT_YET => waiting += 1,
+            // A blocked agent is neither waiting to start nor working: it is
+            // waiting on the user.
+            status::STATUS_BLOCKED => blocked += 1,
             status::STATUS_FINISHED => finished += 1,
             status::STATUS_DEAD => dead += 1,
             status::STATUS_GIT_CONFLICT => conflict += 1,
@@ -764,6 +773,7 @@ fn quit_counts(processes: &[Process]) -> (usize, usize, usize, usize, usize, usi
         running,
         working,
         waiting,
+        blocked,
         finished,
         dead,
         conflict,
@@ -776,7 +786,8 @@ fn render_quit_overlay(
     projects: &[Project],
     processes: &[Process],
 ) {
-    let (total, running, working, waiting, finished, dead, conflict) = quit_counts(processes);
+    let (total, running, working, waiting, blocked, finished, dead, conflict) =
+        quit_counts(processes);
     let has_conflict = conflict > 0;
     let warnings: Vec<Line> = {
         let mut w = Vec::new();
@@ -784,6 +795,12 @@ fn render_quit_overlay(
             w.push(Line::from(Span::styled(
                 "! git conflict — resolve before quitting if you can".to_string(),
                 Style::default().fg(Color::Magenta),
+            )));
+        }
+        if blocked > 0 {
+            w.push(Line::from(Span::styled(
+                "! an agent is waiting for your answer".to_string(),
+                Style::default().fg(Color::Cyan),
             )));
         }
         if working > 0 || running > 0 {
@@ -828,7 +845,9 @@ fn render_quit_overlay(
             ),
             Span::raw(format!("{working}   ")),
             Span::styled("[ ] waiting ".to_string(), Style::default().fg(Color::Gray)),
-            Span::raw(format!("{waiting}")),
+            Span::raw(format!("{waiting}   ")),
+            Span::styled("[?] blocked ".to_string(), Style::default().fg(Color::Cyan)),
+            Span::raw(format!("{blocked}")),
         ]),
         Line::from(vec![
             Span::styled("[✓] done ".to_string(), Style::default().fg(Color::Green)),
@@ -2387,11 +2406,18 @@ mod tests {
         let b = make_proc_with_content(b"", 24, 80);
         b.status
             .store(crate::status::STATUS_GIT_CONFLICT, Ordering::SeqCst);
-        let procs = vec![a, b];
-        let (total, running, working, _waiting, _finished, _dead, conflict) = quit_counts(&procs);
-        assert_eq!(total, 2);
-        assert_eq!(running, 2);
+        let c = make_proc_with_content(b"", 24, 80);
+        c.status
+            .store(crate::status::STATUS_BLOCKED, Ordering::SeqCst);
+        let procs = vec![a, b, c];
+        let (total, running, working, waiting, blocked, _finished, _dead, conflict) =
+            quit_counts(&procs);
+        assert_eq!(total, 3);
+        assert_eq!(running, 3);
         assert_eq!(working, 1);
         assert_eq!(conflict, 1);
+        // Blocked is its own bucket, not "waiting to start" and not "working".
+        assert_eq!(blocked, 1);
+        assert_eq!(waiting, 0);
     }
 }
