@@ -45,7 +45,7 @@ multistack/
 
 ### Status System
 
-Five `u8` constants in `status.rs:12-16`: `STATUS_NOT_YET(0)`, `STATUS_WORKING(1)`, `STATUS_FINISHED(2)`, `STATUS_DEAD(3)`, `STATUS_GIT_CONFLICT(4)`. Helper functions map status to display prefix (`[ ]`, `[~]`, `[✓]`, `[X]`, `[!]`), ratatui colors, and formatted timers.
+Six `u8` constants in `status.rs`: `STATUS_NOT_YET(0)`, `STATUS_WORKING(1)`, `STATUS_FINISHED(2)`, `STATUS_DEAD(3)`, `STATUS_GIT_CONFLICT(4)`, `STATUS_BLOCKED(5)`. Helper functions map status to display prefix (`[ ]`, `[~]`, `[✓]`, `[X]`, `[!]`, `[?]`), ratatui colors, and formatted timers.
 
 ## Control Flow
 
@@ -82,7 +82,8 @@ PTY child process → PTY master reader thread → vt100::Parser.process(bytes) 
 ### Status Communication (Actor Pattern)
 
 ```
-zerostack agent → writes "start"/"stop"/"git-conflict" to Unix socket
+zerostack agent → writes "start"/"stop"/"git-conflict"/"blocked:<reason>"/
+                  "state:working" to Unix socket
                                                                     ↓
 status.rs spawn_status_listener() background thread reads socket
                                                                     ↓
