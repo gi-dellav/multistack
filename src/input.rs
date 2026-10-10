@@ -168,16 +168,18 @@ fn spawn_zerostack(
             "--worktree",
             wt.as_str(),
             "--wt-auto-merge",
+            "--disable-lazygit",
             "--status-socket",
             &socket_path,
         ],
         SpawnMode::Parallel => vec![
             "--parallel",
             "--wt-auto-merge",
+            "--disable-lazygit",
             "--status-socket",
             &socket_path,
         ],
-        SpawnMode::Bare => vec!["--status-socket", &socket_path],
+        SpawnMode::Bare => vec!["--disable-lazygit", "--status-socket", &socket_path],
     };
     let worktree_dir = match &mode {
         SpawnMode::Worktree(wt_name) => {
@@ -499,7 +501,7 @@ fn process_key(
                         match spawn_pty(
                             pty_system,
                             "zerostack",
-                            &["--setup"],
+                            &["--setup", "--disable-lazygit"],
                             None,
                             term_rows,
                             term_cols,
