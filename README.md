@@ -12,9 +12,22 @@ Multistack is designed to be a native, lightweight and open-soruce competitor to
 ## What it does
 
 - **Spawn parallel agents**: each one gets its own PTY, running `zerostack --parallel` under the hood
-- **Live status tracking**: see at a glance who's working `[~]`, done `[✓]`, dead `[X]`, or waiting `[ ]`, with per-agent timers
+- **Live status tracking**: see at a glance who's working `[~]`, done `[✓]`, dead `[X]`, waiting `[ ]`, or waiting on you `[?]`, with per-agent timers
 - **Drop into any agent**: hit Enter on a process to see its full terminal output, keystrokes pass straight through
-- **Status signal support**: multistack listens for `start`/`stop` signals from zerostack via Unix sockets, so timers and indicators stay accurate even across headless loop iterations
+- **Status signal support**: multistack listens for zerostack's `start` and `stop` signals over Unix sockets, so timers and indicators stay accurate even across headless loop iterations, and for the protocol v1.1 `blocked:<reason>` and `state:working` signals, so an agent parked on its permission prompt shows as `[?]`, raises a desktop notification, and stops its timer until you answer
+
+## Agent status
+
+| Glyph | Colour  | Meaning |
+|-------|---------|---------|
+| `[ ]` | gray    | waiting, the agent hasn't started yet |
+| `[~]` | yellow  | working, the timer is running |
+| `[?]` | cyan    | waiting on you, answer the prompt inside the agent |
+| `[✓]` | green   | finished, `stop` signal received |
+| `[X]` | red     | dead, the process exited |
+| `[!]` | magenta | git conflict, resolve it before quitting |
+
+See [STATUS_SIGNAL.md](STATUS_SIGNAL.md) for the wire protocol behind these.
 
 ## Install
 
@@ -90,7 +103,7 @@ You need [zerostack](https://gi-dellav.github.io/zerostack/) on your PATH, plus 
 ## Requirements
 
 - **Linux/BSD/macOS** (uses Unix domain sockets and PTYs)
-- **zerostack v1.5+** built with the `status-signals` feature (default from v1.5)
+- **zerostack v1.5+** built with the `status-signals` feature (default from v1.5). The `[?]` state needs a zerostack carrying status-signal protocol v1.1; older builds simply never send those lines and behave exactly as before. Minimum version: TBD, to be filled in at zerostack's next release
 - Rust 1.85+ (2024 edition)
 
 ## License

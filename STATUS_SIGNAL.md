@@ -1,8 +1,10 @@
-# Status Signals — zerostack Unix Socket Protocol v1.0
+# Status Signals: zerostack Unix Socket Protocol v1.1
 
 ## Overview
 
-zerostack exposes agent lifecycle signals over a Unix domain socket, allowing external processes (status bars, daemons, UI wrappers) to track whether the agent is actively processing or idle.
+zerostack exposes agent lifecycle signals over a Unix domain socket, allowing external processes (status bars, daemons, UI wrappers) to track whether the agent is actively processing, idle, or waiting on a human.
+
+zerostack's own `docs/STATUS_SIGNALS.md` is the canonical protocol reference. This file documents the protocol as multistack consumes it; if the two ever disagree, zerostack's document wins.
 
 The protocol is **one-directional**: zerostack connects to a pre-existing Unix socket as a client and writes plain-text messages. The external process acts as the server — it creates, binds, and listens on the socket.
 
@@ -18,10 +20,10 @@ The protocol is **one-directional**: zerostack connects to a pre-existing Unix s
 ### Build
 
 ```bash
-cargo install --path . --debug --features status-signals
+cargo install --path .
 ```
 
-The `status-signals` feature is **not** in the default feature set and must be explicitly enabled.
+The `status-signals` feature has been part of zerostack's **default** feature set since zerostack v1.5, so no extra build flags are needed. Older builds, and builds made with `--no-default-features`, need it enabled explicitly with `--features status-signals`.
 
 ### Runtime
 
@@ -37,13 +39,33 @@ The path must point to an **already-existing** Unix domain socket. zerostack wil
 
 Each message is a single ASCII line terminated by `\n`:
 
-| Message           | Meaning                                   |
-|-------------------|-------------------------------------------|
-| `start\n`         | Agent run has begun (streaming or single) |
-| `stop\n`          | Agent run has completed or was cancelled  |
-| `git-conflict\n`  | Agent is blocked — user must resolve a Git conflict |
+| Message                | Since | Meaning                                   |
+|------------------------|-------|-------------------------------------------|
+| `start\n`              | v1.0  | Agent run has begun (streaming or single) |
+| `stop\n`               | v1.0  | Agent run has completed or was cancelled  |
+| `git-conflict\n`       | v1.0  | Agent is blocked, the user must resolve a Git conflict |
+| `blocked:permission\n` | v1.1  | The interactive permission prompt is on screen and zerostack is waiting for a human decision |
+| `state:working\n`      | v1.1  | A wait reported by `blocked:<reason>` has ended and zerostack is working again |
 
-No other messages are defined. The protocol is intentionally minimal — richer state is available via the [ACP server](#advanced-acp-server) for full session introspection.
+`blocked:<reason>` and `state:<state>` are lowercase ASCII tokens with no whitespace. Protocol v1.1 defines exactly one reason, `permission`, and exactly one state, `working`; further reasons and states are reserved for later protocol versions. Match on the `blocked:` prefix rather than the full literal, so a reason added later still reads as "waiting on the user".
+
+No other messages are defined. The protocol is intentionally minimal: richer state is available via the [ACP server](#advanced-acp-server) for full session introspection.
+
+### Ordering Guarantees
+
+A permission wait is bracketed in exactly this order:
+
+```
+start -> blocked:permission -> state:working -> ... -> stop
+```
+
+`blocked:permission` is sent only once the prompt is visible, and `state:working` only once the decision has been taken, for every outcome the prompt accepts (allow once, allow always, deny, Esc), including the error paths. The pair is always balanced.
+
+### Run Boundary Invariant
+
+A `blocked:<reason>` or `state:<state>` message never adds or removes a `start` or a `stop`. Filter every line that is not `start`, `stop`, or `git-conflict` out of a v1.1 stream and what remains is byte for byte the v1.0 stream for that same turn. A v1.0 listener that ignores unknown lines therefore behaves identically against a v1.1 sender, and `state:working` must never be treated as the start of a new run.
+
+Only the interactive TUI emits the v1.1 messages. Headless modes (`-p` and `--loop`) pass no ask channel to the permission checker, so no prompt is ever drawn and no permission wait exists to report.
 
 ### Socket Lifecycle
 
@@ -68,13 +90,15 @@ zerostack silently ignores all errors from the Unix socket (connection refused, 
 
 ### TUI Mode (additional triggers)
 
-| Trigger                         | Signals             |
-|---------------------------------|---------------------|
-| Agent spawned for a new prompt  | `start`             |
-| Agent cancelled (user hits Esc) | `stop`              |
-| User invokes `/btw` command     | `stop` then `start` |
-| Git worktree branch switch      | `stop` then `start` |
-| Headless loop re-launch         | `stop` then `start` |
+| Trigger                            | Signals                                |
+|------------------------------------|----------------------------------------|
+| Agent spawned for a new prompt     | `start`                                |
+| Agent cancelled (user hits Esc)    | `stop`                                 |
+| User invokes `/btw` command        | `stop` then `start`                    |
+| Git worktree branch switch         | `stop` then `start`                    |
+| Headless loop re-launch            | `stop` then `start`                    |
+| Permission prompt drawn (v1.1)     | `blocked:permission`                   |
+| Permission decision taken (v1.1)   | `state:working`, no new `start`        |
 
 ### Headless Loop (`--loop`)
 
@@ -83,6 +107,18 @@ Each iteration is wrapped in its own `start`/`stop` pair. Between iterations zer
 ### Single Prompt (`--print` / `-p`)
 
 One `start`/`stop` pair around the single agent call.
+
+## How Multistack Reacts
+
+| Message              | Glyph | Timer                                   | Notification |
+|----------------------|-------|-----------------------------------------|--------------|
+| `start`              | `[~]` | starts a cycle                          | none |
+| `stop`               | `[✓]` | banks the cycle                         | "Agent finished" |
+| `git-conflict`       | `[!]` | banks the cycle, stays frozen           | "Git conflict" |
+| `blocked:<reason>`   | `[?]` | banks the cycle, frozen for the wait    | "Agent needs you" |
+| `state:working`      | `[~]` | starts a new cycle, same run            | none |
+
+`state:working` only moves an agent out of `[?]`; it never revives one that already stopped or died, and it raises no unread dot because it is not a run boundary. `stop` is accepted from `[?]` as well, so an agent that ends on its prompt still lands on `[✓]`. If the process exits while blocked, multistack marks it `[X]`: the prompt died with it.
 
 ## Building a Listener
 
@@ -124,6 +160,12 @@ while True:
             print("zerostack: stopped")
         elif msg == "git-conflict":
             print("zerostack: git conflict — needs user attention")
+        elif msg.startswith("blocked:"):
+            reason = msg.split(":", 1)[1]
+            print(f"zerostack: waiting on you ({reason})")
+        elif msg == "state:working":
+            # Same run, not a new one: do not reset your run counters here.
+            print("zerostack: back to work")
 ```
 
 ### Minimal Rust Example (tokio)
@@ -152,6 +194,12 @@ async fn main() -> std::io::Result<()> {
                     "start"         => println!("zerostack: started"),
                     "stop"          => println!("zerostack: stopped"),
                     "git-conflict"  => println!("zerostack: git conflict — needs user attention"),
+                    // Same run continues, so no new `start` follows.
+                    "state:working" => println!("zerostack: back to work"),
+                    // Prefix match: later versions add more reasons.
+                    l if l.starts_with("blocked:") => {
+                        println!("zerostack: waiting on you ({})", &l["blocked:".len()..])
+                    }
                     _               => eprintln!("unknown: {line}"),
                 }
             }
@@ -166,6 +214,9 @@ async fn main() -> std::io::Result<()> {
 - **Spurious connects with no data**: zerostack may connect and immediately disconnect. Treat this as a no-op.
 - **Socket not cleaned up on crash**: If zerostack is killed, the socket file from a previous listener may persist. Call `unlink()` before binding.
 - **zerostack sends start but never stop**: If zerostack crashes mid-run, no `stop` message will be sent. Use a watchdog timer: if `start` was received with no `stop` within N seconds, consider the agent lost.
+- **Unknown lines**: Ignore anything you do not recognise. This is what keeps a listener working across protocol versions.
+- **`state:working` without a preceding `blocked:`**: Possible on error paths, and after a `stop` on some of them. The protocol itself only asks that the last recognised `state:<state>` win. Multistack applies a stricter policy of its own, treating `state:working` as a no-op unless the agent is actually blocked, so that a stray `state:working` after `stop` cannot resurrect a finished agent. Either way, `stop` stays the run boundary.
+- **Blocked agent dies**: A permission prompt dies with the process it belongs to, so drop the blocked display when the agent exits. Multistack marks such an agent dead rather than leaving it at `[?]`.
 
 ## Advanced: ACP Server
 
@@ -190,8 +241,9 @@ The ACP protocol uses the `agent-client-protocol` crate's schema. See `src/extra
 | Transport         | Unix domain socket, `SOCK_STREAM`             |
 | Direction         | zerostack connects to listener (client role)  |
 | Encoding          | ASCII lines, `\n` delimited                   |
-| Messages          | `start`, `stop`, `git-conflict`               |
-| Feature flag      | `status-signals`                              |
+| Messages (v1.0)   | `start`, `stop`, `git-conflict`               |
+| Messages (v1.1)   | `blocked:permission`, `state:working`         |
+| Feature flag      | `status-signals` (default since zerostack v1.5) |
 | CLI flag          | `--status-socket <PATH>`                      |
 | Creation          | Listener must exist before zerostack runs     |
 | Error behaviour   | Silent ignore (best-effort)                   |
