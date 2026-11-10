@@ -940,6 +940,12 @@ fn key_to_bytes(key: &crossterm::event::KeyEvent) -> Vec<u8> {
         KeyCode::Esc => vec![0x1b],
         KeyCode::Up => vec![0x1b, b'[', b'A'],
         KeyCode::Down => vec![0x1b, b'[', b'B'],
+        KeyCode::Right if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            modified_arrow(b'C', key.modifiers)
+        }
+        KeyCode::Left if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            modified_arrow(b'D', key.modifiers)
+        }
         KeyCode::Right => vec![0x1b, b'[', b'C'],
         KeyCode::Left => vec![0x1b, b'[', b'D'],
         KeyCode::Home => vec![0x1b, b'[', b'H'],
@@ -952,6 +958,20 @@ fn key_to_bytes(key: &crossterm::event::KeyEvent) -> Vec<u8> {
         KeyCode::Null => vec![],
         _ => vec![],
     }
+}
+
+fn modified_arrow(final_byte: u8, modifiers: KeyModifiers) -> Vec<u8> {
+    let mut modifier = 1u8;
+    if modifiers.contains(KeyModifiers::SHIFT) {
+        modifier += 1;
+    }
+    if modifiers.contains(KeyModifiers::ALT) {
+        modifier += 2;
+    }
+    if modifiers.contains(KeyModifiers::CONTROL) {
+        modifier += 4;
+    }
+    vec![0x1b, b'[', b'1', b';', b'0' + modifier, final_byte]
 }
 
 fn f_key(n: u8) -> Vec<u8> {
@@ -1118,6 +1138,25 @@ mod tests {
         assert_eq!(
             key_to_bytes(&kc(KeyCode::PageDown)),
             vec![0x1b, b'[', b'6', b'~']
+        );
+    }
+
+    #[test]
+    fn test_ctrl_arrows_keep_modifier() {
+        assert_eq!(
+            key_to_bytes(&ctrl(KeyCode::Left)),
+            vec![0x1b, b'[', b'1', b';', b'5', b'D']
+        );
+        assert_eq!(
+            key_to_bytes(&ctrl(KeyCode::Right)),
+            vec![0x1b, b'[', b'1', b';', b'5', b'C']
+        );
+        assert_eq!(
+            key_to_bytes(&KeyEvent::new(
+                KeyCode::Left,
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT
+            )),
+            vec![0x1b, b'[', b'1', b';', b'6', b'D']
         );
     }
 
