@@ -538,7 +538,7 @@ pub fn welcome_content(no_worktree: bool) -> Vec<Line<'static>> {
         Line::from("  each in its own terminal with live status + timers."),
         Line::from(""),
         section_header("QUICKSTART"),
-        Line::from("  1. p — add the project directory (if not already listed)"),
+        Line::from("  1. p — add a local project; P — add a remote SSH project"),
         Line::from("  2. n — spawn your first agent (names a git worktree)"),
         Line::from("  3. Enter — drop into the agent, watch it work live"),
         Line::from("  4. Esc — back to the list, d kills the selected agent"),
@@ -610,7 +610,8 @@ pub fn help_content(no_worktree: bool) -> Vec<Line<'static>> {
         key_line("d", "kill agent (runs speck apply if present)"),
         Line::from(""),
         section_header("PROJECTS"),
-        key_line("p", "add project (directory picker)"),
+        key_line("p", "add local project (directory picker)"),
+        key_line("P", "add remote project ([user@]host[:port]/path)"),
         key_line("l", "remove project + all its agents (runs speck apply)"),
         key_line("PgUp / PgDn", "jump to prev / next project header"),
         Line::from(""),
@@ -674,6 +675,8 @@ pub fn help_content(no_worktree: bool) -> Vec<Line<'static>> {
         Line::from("  • -w / --no-worktree: disable git-worktree integration"),
         Line::from("    (n spawns a bare agent, N is disabled)."),
         Line::from("  • -D / --no-activity-dot: disable the unread ● dot."),
+        Line::from("  • --remote=user@host:/path adds a remote project;"),
+        Line::from("    --ssh-suffix='-o Foo=bar' adds ssh client flags."),
         Line::from("  • --attach [PID]: mirror another running instance"),
         Line::from("    (default: oldest; pass a PID for that one; Ctrl+\\ detaches)."),
     ]);
@@ -1006,7 +1009,9 @@ fn render_normal<B: Backend>(
                     ListEntry::ProjectHeader(pid) => {
                         let proj = find_project(projects, *pid);
                         let name = proj.map(|p| p.name.as_str()).unwrap_or("?");
-                        let dir = proj.map(|p| p.directory.as_str()).unwrap_or("?");
+                        let dir = proj
+                            .map(|p| p.target.display_location())
+                            .unwrap_or_else(|| "?".to_string());
                         let line = Line::from(Span::styled(
                             format!("\u{2500}\u{2500} Project: {} ({}) \u{2500}\u{2500}", name, dir),
                             header_style,
@@ -1067,12 +1072,12 @@ fn render_normal<B: Backend>(
             if cols < 40 {
                 Line::from("m:bare r:ren d:kill ?:help q:quit")
             } else {
-                Line::from("m: bare  r: rename  d: kill  h: lazygit  s: shell  p/l: project  Enter: TTY  ?: help  q: quit")
+                Line::from("m: bare  r: rename  d: kill  h: lazygit  s: shell  p/P/l: project  Enter: TTY  ?: help  q: quit")
             }
         } else if cols < 40 {
             Line::from("n:new N:go ?:help q:quit")
         } else {
-            Line::from("n: new  N: spawn&enter  m: bare  r: rename  d: kill  h: lazygit  s: shell  p/l: project  Enter: TTY  ?: help  q: quit")
+            Line::from("n: new  N: spawn&enter  m: bare  r: rename  d: kill  h: lazygit  s: shell  p/P/l: project  Enter: TTY  ?: help  q: quit")
         };
         frame.render_widget(help, help_area);
 
@@ -1136,7 +1141,9 @@ fn render_prompt<B: Backend>(
                         ListEntry::ProjectHeader(pid) => {
                             let proj = find_project(projects, *pid);
                             let name = proj.map(|p| p.name.as_str()).unwrap_or("?");
-                            let dir = proj.map(|p| p.directory.as_str()).unwrap_or("?");
+                            let dir = proj
+                                .map(|p| p.target.display_location())
+                                .unwrap_or_else(|| "?".to_string());
                             let line = Line::from(Span::styled(
                                 format!(
                                     "\u{2500}\u{2500} Project: {} ({}) \u{2500}\u{2500}",
@@ -1168,6 +1175,7 @@ fn render_prompt<B: Backend>(
                     "new name: "
                 }
                 crate::PromptPurpose::NewProject => "project dir: ",
+                crate::PromptPurpose::NewRemoteProject => "remote ([user@]host[:port]/path): ",
                 crate::PromptPurpose::Rename(_) => "rename: ",
             };
             let help = Line::from(format!("{}{}_", label, input));
@@ -1410,6 +1418,7 @@ mod tests {
             project_id: 1,
             project_dir: "/tmp".into(),
             worktree_dir: None,
+            host: crate::remote::ExecutionHost::Local,
             name: "test".into(),
             child: None,
             master: None,
@@ -1544,11 +1553,7 @@ mod tests {
     fn test_render_normal_and_prompt_do_not_panic() {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
-        let projects = vec![crate::project::Project {
-            id: 1,
-            name: "proj".into(),
-            directory: "/tmp".into(),
-        }];
+        let projects = vec![crate::project::Project::local(1, "proj", "/tmp")];
         let proc = make_proc_with_content(b"", 24, 80);
         let entries = crate::project::build_entries(&projects, &[proc]);
         let res = render_normal(
@@ -1686,11 +1691,7 @@ mod tests {
     fn test_full_tui_tty_tui_roundtrip_repaints_everything() {
         let backend = TestBackend::new(30, 8);
         let mut terminal = Terminal::new(backend).unwrap();
-        let projects = vec![crate::project::Project {
-            id: 1,
-            name: "proj".into(),
-            directory: "/tmp".into(),
-        }];
+        let projects = vec![crate::project::Project::local(1, "proj", "/tmp")];
         let proc = make_proc_with_content(b"child output", 8, 30);
         let entries = crate::project::build_entries(&projects, std::slice::from_ref(&proc));
 
@@ -1835,11 +1836,7 @@ mod tests {
         // diff covers the whole viewport).
         let backend = TestBackend::new(30, 8);
         let mut terminal = Terminal::new(backend).unwrap();
-        let projects = vec![crate::project::Project {
-            id: 1,
-            name: "proj".into(),
-            directory: "/tmp".into(),
-        }];
+        let projects = vec![crate::project::Project::local(1, "proj", "/tmp")];
         let proc = make_proc_with_content(b"xyz", 8, 30);
         let entries = crate::project::build_entries(&projects, std::slice::from_ref(&proc));
 
@@ -1911,11 +1908,7 @@ mod tests {
 
         let backend = TestBackend::new(30, 8);
         let mut terminal = Terminal::new(backend).unwrap();
-        let projects = vec![crate::project::Project {
-            id: 1,
-            name: "proj".into(),
-            directory: "/tmp".into(),
-        }];
+        let projects = vec![crate::project::Project::local(1, "proj", "/tmp")];
         let proc = make_proc_with_content(b"idle", 8, 30);
         let entries = crate::project::build_entries(&projects, std::slice::from_ref(&proc));
         let mode = crate::Mode::Normal { selected: 0 };
@@ -2244,11 +2237,7 @@ mod tests {
         for (page, title) in [(HelpPage::Welcome, "(1/2)"), (HelpPage::Help, "(2/2)")] {
             let backend = TestBackend::new(80, 24);
             let mut terminal = Terminal::new(backend).unwrap();
-            let projects = vec![crate::project::Project {
-                id: 1,
-                name: "proj".into(),
-                directory: "/tmp".into(),
-            }];
+            let projects = vec![crate::project::Project::local(1, "proj", "/tmp")];
             let proc = make_proc_with_content(b"", 24, 80);
             let entries = crate::project::build_entries(&projects, std::slice::from_ref(&proc));
             render_normal(
@@ -2287,11 +2276,7 @@ mod tests {
         fn render_with(unread: bool, dot_enabled: bool) -> String {
             let backend = TestBackend::new(80, 24);
             let mut terminal = Terminal::new(backend).unwrap();
-            let projects = vec![crate::project::Project {
-                id: 1,
-                name: "proj".into(),
-                directory: "/tmp".into(),
-            }];
+            let projects = vec![crate::project::Project::local(1, "proj", "/tmp")];
             let proc = make_proc_with_content(b"", 24, 80);
             proc.has_unread.store(unread, Ordering::SeqCst);
             let entries = crate::project::build_entries(&projects, std::slice::from_ref(&proc));
@@ -2333,11 +2318,7 @@ mod tests {
     fn test_render_help_and_quit_overlays_do_not_panic() {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
-        let projects = vec![crate::project::Project {
-            id: 1,
-            name: "proj".into(),
-            directory: "/tmp".into(),
-        }];
+        let projects = vec![crate::project::Project::local(1, "proj", "/tmp")];
         let proc = make_proc_with_content(b"", 24, 80);
         let entries = crate::project::build_entries(&projects, std::slice::from_ref(&proc));
         // Help overlay, top and scrolled.

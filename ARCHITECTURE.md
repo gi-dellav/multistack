@@ -12,6 +12,7 @@ multistack/
 │   ├── persistence.rs # Project list save/load to ~/.local/share/zerostack/multistack_projects
 │   ├── process.rs     # Process struct, PTY spawn/teardown, vt100 parser lifecycle
 │   ├── project.rs     # Project struct, ListEntry enum, view-model construction
+│   ├── remote.rs      # SSH targets, target parsing/quoting, ssh argv construction
 │   ├── status.rs      # Status constants, formatting, Unix-socket status listener thread
 │   └── ui.rs          # Ratatui rendering for all modes, layout, styling
 ├── reference_examples/  # Standalone examples (not compiled) — PTY, crossterm, vt100, ratatui
@@ -28,7 +29,7 @@ multistack/
 
 - **`Process`** (`process.rs:14-30`) — Central abstraction. Wraps a PTY child process with its master/writer handles, a shared `vt100::Parser` (screen buffer), and atomic status/timing/alive flags shared across threads. Implements `Drop` for clean shutdown.
 
-- **`Project`** (`project.rs:3-7`) — Groups agents by working directory: `{ id, name, directory }`.
+- **`Project`** (`project.rs:4-8`) — Groups agents by working directory: `{ id, name, target }`, where `target` is a local or SSH `ProjectTarget`.
 
 - **`ListEntry`** (`project.rs:9-12`) — Flattened enum: `ProjectHeader(usize)` or `Agent(usize)`. Built from projects+processes for the TUI navigable list.
 
@@ -85,7 +86,7 @@ PTY child process → PTY master reader thread → vt100::Parser.process(bytes) 
 zerostack agent → writes "start"/"stop"/"git-conflict"/"blocked:<reason>"/
                   "state:working" to Unix socket
                                                                     ↓
-status.rs spawn_status_listener() background thread reads socket
+status.rs start_status_listener() background thread reads socket
                                                                     ↓
           Updates shared Arc<AtomicU8> status, Arc<AtomicU64> active_ms,
           Arc<Mutex<Option<Instant>>> cycle_start
@@ -95,6 +96,14 @@ status.rs spawn_status_listener() background thread reads socket
 
 No Rust channels are used. Inter-thread communication is exclusively through shared atomic state (`Arc<AtomicBool/U8/U64>`) and `parking_lot::Mutex` (for the cycle timer).
 
+For remote projects the listener still binds locally, but the child is
+`ssh -tt` instead of `zerostack`. The SSH argv includes
+`-R <remote_sock>:<local_sock>`: sshd creates the socket on the server and
+forwards remote zerostack's status messages to the local listener. The local
+socket is bound synchronously before spawning ssh, because the forward needs
+its destination to exist when the connection is established. No relay binary
+is required on the server.
+
 ### View-Model Assembly
 
 `project::build_entries()` flattens `Vec<Project>` + `Vec<Process>` into `Vec<ListEntry>`. `ProjectHeader` entries appear only when multiple projects exist. The UI list widget renders each entry with `process_item()` (status prefix, color, timer, truncated name).
@@ -103,7 +112,8 @@ No Rust channels are used. Inter-thread communication is exclusively through sha
 
 - **Single-threaded async** — Tokio `current_thread` rather than multi-threaded. All UI and state is single-owner; atomics serve background threads (PTY reader, status listener). Avoids synchronization complexity.
 - **CLI flags** — Two optional booleans parsed with `clap`: `-c`/`--continue` loads the saved project list on startup; `--dont-save` disables all persistence (load and save). No config files.
-- **Project list persistence** — `persistence.rs` saves the project directory list to `$DATA_DIR/zerostack/multistack_projects` (resolved via `dirs` crate) on every project add/remove. The file is newline-separated directory paths. Loading is opt-in via `-c`.
+- **Project list persistence** — `persistence.rs` saves the project list to `$DATA_DIR/zerostack/multistack_projects` (resolved via `dirs` crate) on every project add/remove. The v2 format is tab-separated (`v2\tlocal\t...` or `v2\tssh\tuser\thost\tport\tdir`, with backslash escaping); legacy one-path-per-line files still load as local projects. Loading is opt-in via `-c`.
+- **Remote projects** — the local instance remains the only owner of PTYs and state. Remote agents/tools are local `ssh` processes; paths are interpreted on the remote host, and `Process.host` records that. Status uses SSH stream-local forwarding, so no multistack daemon is needed remotely. `--ssh-suffix` appends user-supplied flags to every ssh invocation.
 - **Modal UI** — Vim-inspired modes (Normal, Insert/Tty, Prompt) mapped via the `Mode` enum. Each mode has its own keybinding table in `input.rs`.
 - **Direct terminal rendering in TTY mode** — `render_tty()` writes vt100-parsed screen content directly to stdout, bypassing ratatui's framebuffer. This gives pixel-perfect terminal emulation for the active agent.
 - **Shared-memory actor pattern** — Status listener thread and PTY reader threads communicate with the main loop via `Arc<Atomic*>` rather than channels. Simple, lock-free for reads.

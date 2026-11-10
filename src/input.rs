@@ -9,9 +9,11 @@ use ratatui_explorer_multistack::{FileExplorerBuilder, Theme};
 use crate::Mode;
 use crate::persistence::save_projects;
 use crate::process::{
-    Process, resize_parsers, run_speck_apply_if_present, spawn_process, spawn_pty,
+    Launch, Process, SpawnSpec, StatusOptions, resize_parsers, run_speck_apply_if_present,
+    spawn_process, spawn_pty,
 };
 use crate::project::{ListEntry, Project, is_agent, resolve_project};
+use crate::remote::{self, ProjectTarget};
 
 #[allow(clippy::too_many_arguments)]
 pub fn process_event(
@@ -131,11 +133,17 @@ pub fn process_event(
     Ok(false)
 }
 
-fn find_project_dir(projects: &[Project], project_id: usize) -> Option<String> {
+fn find_project_target(projects: &[Project], project_id: usize) -> Option<&ProjectTarget> {
     projects
         .iter()
         .find(|p| p.id == project_id)
-        .map(|p| p.directory.clone())
+        .map(|p| &p.target)
+}
+
+fn local_working_directory() -> String {
+    std::env::current_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| ".".to_string())
 }
 
 enum SpawnMode {
@@ -150,7 +158,7 @@ fn spawn_zerostack(
     next_id: &mut usize,
     processes: &mut Vec<Process>,
     project_id: usize,
-    project_dir: &str,
+    target: &ProjectTarget,
     title: Option<&str>,
     mode: SpawnMode,
     term_rows: u16,
@@ -162,51 +170,69 @@ fn spawn_zerostack(
     let mut rand_bytes = [0u8; 4];
     let _ = std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut rand_bytes));
     let rand_suffix = format!("{:08x}", u32::from_le_bytes(rand_bytes));
-    let socket_path = format!("/tmp/multistack-{}-{}.sock", id, rand_suffix);
-    let args: Vec<&str> = match &mode {
+    let local_socket = format!("/tmp/multistack-l-{}-{}.sock", id, rand_suffix);
+    let remote_socket = target
+        .is_remote()
+        .then(|| format!("/tmp/multistack-r-{}-{}.sock", id, rand_suffix));
+    let status_socket = remote_socket.as_deref().unwrap_or(&local_socket);
+    let args: Vec<String> = match &mode {
         SpawnMode::Worktree(wt) => vec![
-            "--worktree",
-            wt.as_str(),
-            "--wt-auto-merge",
-            "--disable-lazygit",
-            "--status-socket",
-            &socket_path,
+            "--worktree".into(),
+            wt.clone(),
+            "--wt-auto-merge".into(),
+            "--disable-lazygit".into(),
+            "--status-socket".into(),
+            status_socket.to_string(),
         ],
         SpawnMode::Parallel => vec![
-            "--parallel",
-            "--wt-auto-merge",
-            "--disable-lazygit",
-            "--status-socket",
-            &socket_path,
+            "--parallel".into(),
+            "--wt-auto-merge".into(),
+            "--disable-lazygit".into(),
+            "--status-socket".into(),
+            status_socket.to_string(),
         ],
-        SpawnMode::Bare => vec!["--disable-lazygit", "--status-socket", &socket_path],
+        SpawnMode::Bare => vec![
+            "--disable-lazygit".into(),
+            "--status-socket".into(),
+            status_socket.to_string(),
+        ],
     };
     let worktree_dir = match &mode {
-        SpawnMode::Worktree(wt_name) => {
-            let parent = Path::new(project_dir)
-                .parent()
-                .filter(|p| !p.as_os_str().is_empty());
-            match parent {
-                Some(p) => Some(format!("{}/{wt_name}", p.to_string_lossy())),
-                None => Some(format!("./{wt_name}")),
-            }
-        }
+        SpawnMode::Worktree(wt_name) => Some(remote::sibling_dir(target.dir(), wt_name)),
         _ => None,
     };
-    match spawn_process(
-        pty_system,
-        next_id,
+    let display_title = title
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("zerostack {}", args.join(" ")));
+    let launch = match target.ssh_target() {
+        None => Launch::Local {
+            program: "zerostack".to_string(),
+            args,
+        },
+        Some(host) => Launch::Ssh {
+            target: host.clone(),
+            remote_command: remote::remote_command(target.dir(), "zerostack", &args),
+            remote_status_socket: remote_socket.clone(),
+        },
+    };
+    let local_cwd = if target.is_remote() {
+        local_working_directory()
+    } else {
+        target.dir().to_string()
+    };
+    let spec = SpawnSpec {
+        launch,
+        title: Some(display_title),
+        rows: term_rows,
+        cols: term_cols,
+        local_cwd,
         project_id,
-        "zerostack",
-        &args,
-        title,
-        term_rows,
-        term_cols,
-        Some(&socket_path),
-        project_dir,
-        worktree_dir.as_deref(),
+        project_dir: target.dir().to_string(),
+        worktree_dir,
+        status: Some(StatusOptions { local_socket }),
         activity_dot_enabled,
-    ) {
+    };
+    match spawn_process(pty_system, next_id, spec) {
         Ok(proc) => {
             if processes.is_empty() {
                 *selected = 0;
@@ -258,34 +284,57 @@ fn worktree_name(title: &str) -> String {
     format!("wt-{sanitized}-{h:02}-{m:02}-{s:02}-{sub:09}-{pid}-{ctr}")
 }
 
-#[cfg(test)]
-fn worktree_dir(project_dir: &str, wt_name: &str) -> String {
-    // `parent()` returns Some("") for relative paths ("project" -> "") and
-    // None for "/" — both previous cases produced garbage like "/wt-foo".
-    let parent = Path::new(project_dir)
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty());
-    match parent {
-        Some(p) => format!("{}/{wt_name}", p.to_string_lossy()),
-        None => format!("./{wt_name}"),
-    }
+/// Spawn a transient tool (lazygit/shell/setup) either locally or over SSH.
+/// `remote_command` is only used when the project is remote.
+#[allow(clippy::too_many_arguments)]
+fn spawn_tool_process(
+    pty_system: &NativePtySystem,
+    rows: u16,
+    cols: u16,
+    target: &ProjectTarget,
+    dir: &str,
+    local_program: &str,
+    local_args: &[String],
+    remote_command: &str,
+) -> std::io::Result<Process> {
+    let local_cwd = if target.is_remote() {
+        local_working_directory()
+    } else {
+        dir.to_string()
+    };
+    let (program, args) = if let Some(host) = target.ssh_target() {
+        (
+            "ssh".to_string(),
+            remote::ssh_argv(host, remote_command, &[], remote::ssh_suffix()),
+        )
+    } else {
+        (local_program.to_string(), local_args.to_vec())
+    };
+    let mut process = spawn_pty(pty_system, &program, &args, None, rows, cols, &local_cwd)?;
+    process.host = target.execution_host();
+    process.project_dir = dir.to_string();
+    Ok(process)
 }
 
-/// Sibling directory a `--worktree` agent is expected to use. Shared with
-/// `spawn_zerostack` above so h/lazygit/shell and speck-apply target the same
-/// path the agent was told to create.
-///
-/// Kept as a free function (wrapping the same parent/sibling logic) so it
-/// stays unit testable without constructing a full `Process`.
-#[allow(dead_code)]
-pub(crate) fn expected_worktree_dir(project_dir: &str, wt_name: &str) -> String {
-    let parent = Path::new(project_dir)
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty());
-    match parent {
-        Some(p) => format!("{}/{wt_name}", p.to_string_lossy()),
-        None => format!("./{wt_name}"),
+/// Directory a tool should open: the agent worktree when selected, else the
+/// project directory. Remote paths cannot be checked locally, so they are
+/// attempted as-is.
+fn tool_target_dir(
+    entries: &[ListEntry],
+    selected: usize,
+    processes: &[Process],
+    target: &ProjectTarget,
+) -> String {
+    if is_agent(entries, selected)
+        && let ListEntry::Agent(proc_id) = entries[selected]
+        && let Some(proc) = processes.iter().find(|p| p.id == proc_id)
+    {
+        let eff = proc.effective_dir();
+        if target.is_remote() || Path::new(&eff).is_dir() {
+            return eff;
+        }
     }
+    target.dir().to_string()
 }
 
 fn open_help(show_help: &mut bool, help_page: &mut crate::ui::HelpPage, help_scroll: &mut u16) {
@@ -337,7 +386,7 @@ fn process_key(
                 KeyCode::Char('N') => {
                     if !no_worktree
                         && let Some(project_id) = resolve_project(entries, projects, *selected)
-                        && let Some(dir) = find_project_dir(projects, project_id)
+                        && let Some(target) = find_project_target(projects, project_id)
                     {
                         let new_selected = *selected;
                         let len_before = processes.len();
@@ -346,7 +395,7 @@ fn process_key(
                             next_id,
                             processes,
                             project_id,
-                            &dir,
+                            target,
                             None,
                             SpawnMode::Parallel,
                             term_rows,
@@ -390,6 +439,13 @@ fn process_key(
                         }
                     }
                 }
+                KeyCode::Char('P') => {
+                    *mode = Mode::Prompt {
+                        purpose: crate::PromptPurpose::NewRemoteProject,
+                        selected: *selected,
+                        input: String::new(),
+                    };
+                }
                 KeyCode::Char('l') => {
                     if let Some(project_id) = resolve_project(entries, projects, *selected) {
                         let header_idx = if entries.is_empty() || *selected >= entries.len() {
@@ -400,12 +456,12 @@ fn process_key(
                             .rposition(|e| matches!(e, ListEntry::ProjectHeader(pid) if *pid == project_id))
                             .unwrap_or(0)
                         };
-                        if let Some(dir) = find_project_dir(projects, project_id) {
-                            run_speck_apply_if_present(&dir);
+                        if let Some(target) = find_project_target(projects, project_id) {
+                            run_speck_apply_if_present(&target.execution_host(), target.dir());
                         }
                         // Also flush any agent worktrees under this project.
                         for p in processes.iter().filter(|p| p.project_id == project_id) {
-                            run_speck_apply_if_present(&p.effective_dir());
+                            run_speck_apply_if_present(&p.host, &p.effective_dir());
                         }
                         processes.retain(|p| p.project_id != project_id);
                         projects.retain(|p| p.id != project_id);
@@ -417,29 +473,22 @@ fn process_key(
                 }
                 KeyCode::Char('h') => {
                     if let Some(project_id) = resolve_project(entries, projects, *selected)
-                        && let Some(dir) = find_project_dir(projects, project_id)
+                        && let Some(target) = find_project_target(projects, project_id)
                     {
-                        let target_dir = if is_agent(entries, *selected)
-                            && let ListEntry::Agent(proc_id) = entries[*selected]
-                            && let Some(proc) = processes.iter().find(|p| p.id == proc_id)
-                        {
-                            let eff = proc.effective_dir();
-                            if Path::new(&eff).is_dir() { eff } else { dir }
-                        } else {
-                            dir
-                        };
-                        match spawn_pty(
+                        let target_dir = tool_target_dir(entries, *selected, processes, target);
+                        let remote_command = remote::remote_command(&target_dir, "lazygit", &[]);
+                        match spawn_tool_process(
                             pty_system,
-                            "lazygit",
-                            &[],
-                            None,
                             term_rows,
                             term_cols,
+                            target,
                             &target_dir,
+                            "lazygit",
+                            &[],
+                            &remote_command,
                         ) {
                             Ok(mut process) => {
                                 process.kill_on_drop = true;
-                                process.project_dir = target_dir.clone();
                                 *mode = Mode::TempTty {
                                     process: Box::new(process),
                                     previous_selected: *selected,
@@ -456,30 +505,23 @@ fn process_key(
                 }
                 KeyCode::Char('s') => {
                     if let Some(project_id) = resolve_project(entries, projects, *selected)
-                        && let Some(dir) = find_project_dir(projects, project_id)
+                        && let Some(target) = find_project_target(projects, project_id)
                     {
-                        let target_dir = if is_agent(entries, *selected)
-                            && let ListEntry::Agent(proc_id) = entries[*selected]
-                            && let Some(proc) = processes.iter().find(|p| p.id == proc_id)
-                        {
-                            let eff = proc.effective_dir();
-                            if Path::new(&eff).is_dir() { eff } else { dir }
-                        } else {
-                            dir
-                        };
+                        let target_dir = tool_target_dir(entries, *selected, processes, target);
                         let shell = std::env::var("SHELL").unwrap_or_else(|_| "bash".to_string());
-                        match spawn_pty(
+                        let remote_command = remote::remote_shell_command(&target_dir);
+                        match spawn_tool_process(
                             pty_system,
-                            &shell,
-                            &[],
-                            None,
                             term_rows,
                             term_cols,
+                            target,
                             &target_dir,
+                            &shell,
+                            &[],
+                            &remote_command,
                         ) {
                             Ok(mut process) => {
                                 process.kill_on_drop = true;
-                                process.project_dir = target_dir.clone();
                                 *mode = Mode::TempTty {
                                     process: Box::new(process),
                                     previous_selected: *selected,
@@ -496,20 +538,23 @@ fn process_key(
                 }
                 KeyCode::Char('c') => {
                     if let Some(project_id) = resolve_project(entries, projects, *selected)
-                        && let Some(dir) = find_project_dir(projects, project_id)
+                        && let Some(target) = find_project_target(projects, project_id)
                     {
-                        match spawn_pty(
+                        let dir = target.dir().to_string();
+                        let args = vec!["--setup".to_string(), "--disable-lazygit".to_string()];
+                        let remote_command = remote::remote_command(&dir, "zerostack", &args);
+                        match spawn_tool_process(
                             pty_system,
-                            "zerostack",
-                            &["--setup", "--disable-lazygit"],
-                            None,
                             term_rows,
                             term_cols,
+                            target,
                             &dir,
+                            "zerostack",
+                            &args,
+                            &remote_command,
                         ) {
                             Ok(mut process) => {
                                 process.kill_on_drop = true;
-                                process.project_dir = dir.clone();
                                 *mode = Mode::TempTty {
                                     process: Box::new(process),
                                     previous_selected: *selected,
@@ -541,12 +586,8 @@ fn process_key(
                     if is_agent(entries, *selected)
                         && let ListEntry::Agent(proc_id) = entries[*selected]
                     {
-                        if let Some(dir) = processes
-                            .iter()
-                            .find(|p| p.id == proc_id)
-                            .map(|p| p.project_dir.clone())
-                        {
-                            run_speck_apply_if_present(&dir);
+                        if let Some(proc) = processes.iter().find(|p| p.id == proc_id) {
+                            run_speck_apply_if_present(&proc.host, &proc.project_dir);
                         }
                         processes.retain(|p| p.id != proc_id);
                         if *selected > 0 {
@@ -662,7 +703,7 @@ fn process_key(
                 match purpose {
                     crate::PromptPurpose::NewProcess(project_id) => {
                         let pid = *project_id;
-                        if let Some(dir) = find_project_dir(projects, pid) {
+                        if let Some(target) = find_project_target(projects, pid) {
                             let display = if title.is_empty() {
                                 "agent".to_string()
                             } else {
@@ -678,7 +719,7 @@ fn process_key(
                                 next_id,
                                 processes,
                                 pid,
-                                &dir,
+                                target,
                                 Some(&display),
                                 SpawnMode::Worktree(wt_name),
                                 term_rows,
@@ -690,7 +731,7 @@ fn process_key(
                     }
                     crate::PromptPurpose::NewBareProcess(project_id) => {
                         let pid = *project_id;
-                        if let Some(dir) = find_project_dir(projects, pid) {
+                        if let Some(target) = find_project_target(projects, pid) {
                             let display = if title.is_empty() {
                                 "agent".to_string()
                             } else {
@@ -701,7 +742,7 @@ fn process_key(
                                 next_id,
                                 processes,
                                 pid,
-                                &dir,
+                                target,
                                 Some(&display),
                                 SpawnMode::Bare,
                                 term_rows,
@@ -722,22 +763,18 @@ fn process_key(
                                 // Canonicalize before comparing: the same dir
                                 // typed as `~/proj` vs `/home/u/proj` or with
                                 // a trailing slash must not create duplicates.
-                                if projects.iter().any(|p| p.directory == dir) {
+                                let target = ProjectTarget::local(dir);
+                                if projects
+                                    .iter()
+                                    .any(|p| p.target.identity_key() == target.identity_key())
+                                {
                                     let _ = notify_rust::Notification::new()
                                         .summary("Project already added")
-                                        .body(&dir)
+                                        .body(&target.display_location())
                                         .show();
                                 } else {
-                                    let name = Path::new(&dir)
-                                        .file_name()
-                                        .and_then(|n| n.to_str())
-                                        .unwrap_or(&dir)
-                                        .to_string();
-                                    projects.push(Project {
-                                        id: *next_project_id,
-                                        name,
-                                        directory: dir,
-                                    });
+                                    let project = Project::from_target(*next_project_id, target);
+                                    projects.push(project);
                                     *next_project_id += 1;
                                     if !dont_save {
                                         let _ = save_projects(projects);
@@ -748,6 +785,41 @@ fn process_key(
                                     .summary("Invalid directory")
                                     .body(&format!("Directory does not exist: {}", title))
                                     .show();
+                            }
+                        }
+                    }
+                    crate::PromptPurpose::NewRemoteProject => {
+                        if title.is_empty() {
+                            return Ok(false);
+                        }
+                        match remote::parse_target(&title) {
+                            Ok(target) => {
+                                if projects
+                                    .iter()
+                                    .any(|p| p.target.identity_key() == target.identity_key())
+                                {
+                                    let _ = notify_rust::Notification::new()
+                                        .summary("Project already added")
+                                        .body(&target.display_location())
+                                        .show();
+                                    *input = title;
+                                    return Ok(false);
+                                } else {
+                                    let project = Project::from_target(*next_project_id, target);
+                                    projects.push(project);
+                                    *next_project_id += 1;
+                                    if !dont_save {
+                                        let _ = save_projects(projects);
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                let _ = notify_rust::Notification::new()
+                                    .summary("Invalid remote project")
+                                    .body(&e)
+                                    .show();
+                                *input = title;
+                                return Ok(false);
                             }
                         }
                     }
@@ -845,32 +917,26 @@ fn process_key(
                 }
                 KeyCode::Enter => {
                     let current = explorer.current();
-                    let (name, dir) = if current.is_dir {
+                    let dir = if current.is_dir {
                         let path = &current.path;
-                        let canonical = path
-                            .canonicalize()
+                        path.canonicalize()
                             .map(|p| p.to_string_lossy().to_string())
-                            .unwrap_or_else(|_| path.to_string_lossy().to_string());
-                        let name = Path::new(&canonical)
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or(&canonical)
-                            .to_string();
-                        (name, canonical)
+                            .unwrap_or_else(|_| path.to_string_lossy().to_string())
                     } else {
                         return Ok(false);
                     };
-                    if projects.iter().any(|p| p.directory == dir) {
+                    let target = ProjectTarget::local(dir);
+                    if projects
+                        .iter()
+                        .any(|p| p.target.identity_key() == target.identity_key())
+                    {
                         let _ = notify_rust::Notification::new()
                             .summary("Project already added")
-                            .body(&dir)
+                            .body(&target.display_location())
                             .show();
                     } else {
-                        projects.push(Project {
-                            id: *next_project_id,
-                            name,
-                            directory: dir,
-                        });
+                        let project = Project::from_target(*next_project_id, target);
+                        projects.push(project);
                         *next_project_id += 1;
                         if !dont_save {
                             let _ = save_projects(projects);
@@ -1200,15 +1266,18 @@ mod tests {
         // Same title twice must not collide (ms + pid suffix).
         assert_ne!(worktree_name("dup"), worktree_name("dup"));
         assert_eq!(
-            worktree_dir("/home/user/project", "wt-foo"),
+            remote::sibling_dir("/home/user/project", "wt-foo"),
             "/home/user/wt-foo"
         );
         // Relative path has no parent -> sibling in cwd.
-        assert_eq!(worktree_dir("project", "wt-foo"), "./wt-foo");
+        assert_eq!(remote::sibling_dir("project", "wt-foo"), "./wt-foo");
         // "/" has no parent -> fallback to "."
-        assert_eq!(worktree_dir("/", "wt-foo"), "./wt-foo");
+        assert_eq!(remote::sibling_dir("/", "wt-foo"), "./wt-foo");
         // Normal case
-        assert_eq!(worktree_dir("/tmp/myproj", "wt-test"), "/tmp/wt-test");
+        assert_eq!(
+            remote::sibling_dir("/tmp/myproj", "wt-test"),
+            "/tmp/wt-test"
+        );
     }
 
     // Helper for capture writer
@@ -1234,6 +1303,7 @@ mod tests {
             project_id: 1,
             project_dir: "/tmp".into(),
             worktree_dir: None,
+            host: crate::remote::ExecutionHost::Local,
             name: format!("test{id}"),
             child: None,
             master: None,
@@ -1390,11 +1460,7 @@ mod tests {
     fn test_paste_normal_ignored() {
         let mut mode = crate::Mode::Normal { selected: 0 };
         let mut processes = vec![];
-        let mut projects = vec![crate::project::Project {
-            id: 1,
-            name: "proj".into(),
-            directory: "/tmp".into(),
-        }];
+        let mut projects = vec![crate::project::Project::local(1, "proj", "/tmp")];
         let mut next_pid = 2usize;
         let mut next_id = 1usize;
         let pty_system = portable_pty::NativePtySystem::default();
@@ -1586,11 +1652,7 @@ mod tests {
         let proc = make_capture_process(5, buf);
         let mut processes = vec![proc];
         let mut mode = crate::Mode::Tty { process_id: 5 };
-        let mut projects = vec![crate::project::Project {
-            id: 1,
-            name: "p".into(),
-            directory: "/tmp".into(),
-        }];
+        let mut projects = vec![crate::project::Project::local(1, "p", "/tmp")];
         let entries = crate::project::build_entries(&projects, &processes);
         let mut next_pid = 2usize;
         let mut next_id = 10usize;
@@ -1896,11 +1958,7 @@ mod tests {
         use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
         let mut mode = crate::Mode::Normal { selected: 0 };
         let mut processes = vec![];
-        let mut projects = vec![crate::project::Project {
-            id: 1,
-            name: "proj".into(),
-            directory: "/tmp".into(),
-        }];
+        let mut projects = vec![crate::project::Project::local(1, "proj", "/tmp")];
         let mut next_pid = 2usize;
         let mut next_id = 1usize;
         let pty_system = portable_pty::NativePtySystem::default();
@@ -2023,5 +2081,131 @@ mod tests {
         assert!(show_help);
         assert_eq!(help_page, crate::ui::HelpPage::Help);
         assert_eq!(help_scroll, 0);
+    }
+
+    #[test]
+    fn test_shift_p_opens_remote_project_prompt() {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        let mut mode = crate::Mode::Normal { selected: 0 };
+        let mut projects = vec![];
+        let mut processes = vec![];
+        let mut next_pid = 1usize;
+        let mut next_id = 1usize;
+        let pty_system = portable_pty::NativePtySystem::default();
+        let mut rows = 24u16;
+        let mut cols = 80u16;
+        let entries = vec![];
+        process_event(
+            &mut mode,
+            &mut projects,
+            &mut next_pid,
+            &mut processes,
+            &mut next_id,
+            &pty_system,
+            Event::Key(KeyEvent::new(KeyCode::Char('P'), KeyModifiers::SHIFT)),
+            &mut rows,
+            &mut cols,
+            &entries,
+            true,
+            false,
+            true,
+            false,
+            &mut false,
+            &mut crate::ui::HelpPage::Help,
+            &mut 0u16,
+        )
+        .unwrap();
+        assert!(matches!(
+            mode,
+            crate::Mode::Prompt {
+                purpose: crate::PromptPurpose::NewRemoteProject,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_remote_prompt_adds_project() {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        let mut mode = crate::Mode::Prompt {
+            purpose: crate::PromptPurpose::NewRemoteProject,
+            selected: 0,
+            input: "deploy@buildbox:2222/srv/app".into(),
+        };
+        let mut projects = vec![];
+        let mut processes = vec![];
+        let mut next_pid = 1usize;
+        let mut next_id = 1usize;
+        let pty_system = portable_pty::NativePtySystem::default();
+        let mut rows = 24u16;
+        let mut cols = 80u16;
+        let entries = vec![];
+        process_event(
+            &mut mode,
+            &mut projects,
+            &mut next_pid,
+            &mut processes,
+            &mut next_id,
+            &pty_system,
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            &mut rows,
+            &mut cols,
+            &entries,
+            true,
+            false,
+            true,
+            false,
+            &mut false,
+            &mut crate::ui::HelpPage::Help,
+            &mut 0u16,
+        )
+        .unwrap();
+        assert_eq!(projects.len(), 1);
+        assert_eq!(
+            projects[0].target,
+            crate::remote::parse_target("deploy@buildbox:2222/srv/app").unwrap()
+        );
+        assert_eq!(projects[0].name, "app");
+        assert!(matches!(mode, crate::Mode::Normal { .. }));
+    }
+
+    #[test]
+    fn test_remote_prompt_rejects_invalid_target() {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        let mut mode = crate::Mode::Prompt {
+            purpose: crate::PromptPurpose::NewRemoteProject,
+            selected: 0,
+            input: "not-a-target".into(),
+        };
+        let mut projects = vec![];
+        let mut processes = vec![];
+        let mut next_pid = 1usize;
+        let mut next_id = 1usize;
+        let pty_system = portable_pty::NativePtySystem::default();
+        let mut rows = 24u16;
+        let mut cols = 80u16;
+        let entries = vec![];
+        process_event(
+            &mut mode,
+            &mut projects,
+            &mut next_pid,
+            &mut processes,
+            &mut next_id,
+            &pty_system,
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            &mut rows,
+            &mut cols,
+            &entries,
+            true,
+            false,
+            true,
+            false,
+            &mut false,
+            &mut crate::ui::HelpPage::Help,
+            &mut 0u16,
+        )
+        .unwrap();
+        assert!(projects.is_empty());
+        assert!(matches!(mode, crate::Mode::Prompt { .. }));
     }
 }

@@ -12,6 +12,7 @@ Multistack is designed to be a native, lightweight and open-soruce competitor to
 ## What it does
 
 - **Spawn parallel agents**: each one gets its own PTY, running `zerostack --parallel` under the hood
+- **Local and remote projects**: run agents in a local directory or on an SSH server, with the same keybindings and status tracking
 - **Live status tracking**: see at a glance who's working `[~]`, done `[✓]`, dead `[X]`, waiting `[ ]`, or waiting on you `[?]`, with per-agent timers
 - **Drop into any agent**: hit Enter on a process to see its full terminal output, keystrokes pass straight through
 - **Status signal support**: multistack listens for zerostack's `start` and `stop` signals over Unix sockets, so timers and indicators stay accurate even across headless loop iterations, and for the protocol v1.1 `blocked:<reason>` and `state:working` signals, so an agent parked on its permission prompt shows as `[?]`, raises a desktop notification, and stops its timer until you answer
@@ -53,6 +54,42 @@ cargo install multistack
 
 You need [zerostack](https://gi-dellav.github.io/zerostack/) on your PATH, plus a recent Rust toolchain.
 
+## Remote projects
+
+A project can live on an SSH server. Multistack keeps owning the UI and local
+PTYs; each remote agent is a local `ssh` process running `zerostack` in the
+remote directory. Worktrees, lazygit, `$SHELL`, setup, status signals and
+timers all work the same way as for local projects.
+
+Add one from the TUI with `P`, or at startup:
+
+```bash
+multistack --remote=deploy@buildbox:/srv/app
+multistack --remote=buildbox:2222/srv/app --remote=user@other:/srv/other
+```
+
+The accepted form is `[user@]host[:port]/path` (or the equivalent
+`ssh://[user@]host[:port]/path`). Paths must be absolute on the remote host.
+Host aliases and options from `~/.ssh/config` are honored because multistack
+shells out to the system OpenSSH client.
+
+Remote status signals use OpenSSH Unix-socket forwarding
+(`ssh -R remote_sock:local_sock`), so the server needs Unix-socket forwarding
+enabled (`AllowStreamLocalForwarding yes`, the default). If the server disables
+it, remote agents still run but their status stays `[ ]`.
+
+Requirements on the remote host: zerostack (v1.5+ for status signals),
+`lazygit`/`speck` if you use those actions, and a POSIX shell. Authentication
+and host-key prompts appear inside the agent's TTY; press Enter on the agent to
+answer them. To avoid repeated auth prompts across agents and tools, enable
+`ControlMaster` in `~/.ssh/config`.
+
+Use `--ssh-suffix` to pass extra flags to every ssh invocation:
+
+```bash
+multistack --ssh-suffix="-o ConnectTimeout=5" --ssh-suffix="-i /home/me/.ssh/build_key"
+```
+
 ## Keybindings
 
 ### Agent list (normal mode)
@@ -62,7 +99,8 @@ You need [zerostack](https://gi-dellav.github.io/zerostack/) on your PATH, plus 
 | `n` | Spawn new agent — prompts for a name, creates a git worktree |
 | `N` | Spawn new agent in parallel mode — no prompt, jumps straight to TTY |
 | `m` | Spawn bare agent — no worktree, no `--parallel`, jumps to TTY |
-| `p` | Add project — opens directory picker |
+| `p` | Add local project — opens directory picker |
+| `P` | Add remote project — prompts for `[user@]host[:port]/path` |
 | `l` | Remove project and all its agents |
 | `h` | Open `lazygit` in the project (or agent worktree) directory |
 | `s` | Open `$SHELL` in the project (or agent worktree) directory |

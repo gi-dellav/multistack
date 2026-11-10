@@ -1,4 +1,4 @@
-use std::io::Read;
+use std::io::{self, Read};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
@@ -7,6 +7,8 @@ use std::time::{Duration, Instant};
 
 use notify_rust::Notification;
 use parking_lot::Mutex;
+
+use crate::remote::ExecutionHost;
 
 pub const STATUS_NOT_YET: u8 = 0;
 pub const STATUS_WORKING: u8 = 1;
@@ -58,8 +60,33 @@ pub fn format_timer(active_ms: u64, cycle_start: &Option<Instant>) -> String {
     }
 }
 
+/// A bound status listener. Binding happens synchronously in
+/// [`start_status_listener`], so callers can safely spawn the child (or set
+/// up an SSH `-R` forward to the socket) immediately afterwards.
+pub struct StatusListener {
+    pub shutdown: Arc<AtomicBool>,
+    pub handle: JoinHandle<()>,
+    pub socket_path: String,
+}
+
+impl StatusListener {
+    /// Stop the accept loop, join it, and unlink the local socket. Used on
+    /// spawn-failure paths where there is no `Process` to own cleanup.
+    pub fn stop(self) {
+        self.shutdown.store(true, Ordering::SeqCst);
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !self.handle.is_finished() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if self.handle.is_finished() {
+            let _ = self.handle.join();
+        }
+        let _ = std::fs::remove_file(&self.socket_path);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
-pub fn spawn_status_listener(
+pub fn start_status_listener(
     status: Arc<AtomicU8>,
     active_ms: Arc<AtomicU64>,
     cycle_start: Arc<Mutex<Option<Instant>>>,
@@ -68,18 +95,16 @@ pub fn spawn_status_listener(
     socket_path: String,
     process_name: Arc<Mutex<String>>,
     project_dir: String,
-) -> (Arc<AtomicBool>, JoinHandle<()>) {
+    host: ExecutionHost,
+) -> io::Result<StatusListener> {
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = UnixListener::bind(&socket_path)?;
+    listener.set_nonblocking(true).ok();
+
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_clone = shutdown.clone();
 
     let handle = std::thread::spawn(move || {
-        let _ = std::fs::remove_file(&socket_path);
-        let listener = match UnixListener::bind(&socket_path) {
-            Ok(l) => l,
-            Err(_) => return,
-        };
-        listener.set_nonblocking(true).ok();
-
         loop {
             match listener.accept() {
                 Ok((stream, _)) => {
@@ -165,7 +190,7 @@ pub fn spawn_status_listener(
                                     if activity_dot_enabled {
                                         has_unread.store(true, Ordering::SeqCst);
                                     }
-                                    crate::process::run_speck_apply_if_present(&project_dir);
+                                    crate::process::run_speck_apply_if_present(&host, &project_dir);
                                     let name = process_name.lock().clone();
                                     let _ = Notification::new()
                                         .summary("Agent finished")
@@ -276,7 +301,11 @@ pub fn spawn_status_listener(
         }
     });
 
-    (shutdown, handle)
+    Ok(StatusListener {
+        shutdown,
+        handle,
+        socket_path,
+    })
 }
 
 #[cfg(test)]
@@ -344,8 +373,7 @@ mod tests {
         active_ms: Arc<AtomicU64>,
         cycle_start: Arc<Mutex<Option<Instant>>>,
         has_unread: Arc<AtomicBool>,
-        shutdown: Arc<AtomicBool>,
-        handle: Option<JoinHandle<()>>,
+        listener: Option<StatusListener>,
     }
 
     impl Harness {
@@ -363,7 +391,7 @@ mod tests {
             let active_ms = Arc::new(AtomicU64::new(0));
             let cycle_start = Arc::new(Mutex::new(None));
             let has_unread = Arc::new(AtomicBool::new(false));
-            let (shutdown, handle) = spawn_status_listener(
+            let listener = start_status_listener(
                 status.clone(),
                 active_ms.clone(),
                 cycle_start.clone(),
@@ -372,14 +400,9 @@ mod tests {
                 socket_path.clone(),
                 Arc::new(Mutex::new("agent-1".to_string())),
                 dir.to_string_lossy().into_owned(),
-            );
-
-            // The listener binds on its own thread; wait for the socket.
-            let deadline = Instant::now() + Duration::from_secs(5);
-            while !std::path::Path::new(&socket_path).exists() {
-                assert!(Instant::now() < deadline, "listener never bound the socket");
-                std::thread::sleep(Duration::from_millis(10));
-            }
+                ExecutionHost::Local,
+            )
+            .unwrap();
 
             Self {
                 dir,
@@ -388,8 +411,7 @@ mod tests {
                 active_ms,
                 cycle_start,
                 has_unread,
-                shutdown,
-                handle: Some(handle),
+                listener: Some(listener),
             }
         }
 
@@ -466,9 +488,8 @@ mod tests {
 
     impl Drop for Harness {
         fn drop(&mut self) {
-            self.shutdown.store(true, Ordering::SeqCst);
-            if let Some(handle) = self.handle.take() {
-                let _ = handle.join();
+            if let Some(listener) = self.listener.take() {
+                listener.stop();
             }
             let _ = std::fs::remove_dir_all(&self.dir);
         }

@@ -10,15 +10,18 @@ use parking_lot::Mutex;
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 
 use crate::Mode;
+use crate::remote::{self, ExecutionHost, SshTarget};
 use crate::status;
 
 pub struct Process {
     pub id: usize,
     pub project_id: usize,
+    /// Path on the execution host (local filesystem or remote host).
     pub project_dir: String,
     /// Expected worktree directory for `--worktree` agents (sibling of
     /// `project_dir`). `None` for bare/parallel/temporary processes.
     pub worktree_dir: Option<String>,
+    pub host: ExecutionHost,
     pub name: String,
     pub child: Option<Box<dyn portable_pty::Child + Send>>,
     pub master: Option<Box<dyn portable_pty::MasterPty + Send>>,
@@ -234,8 +237,9 @@ pub fn check_tty_alive(mode: &Mode, processes: &mut Vec<Process>) -> Option<usiz
             // failure reason for the TUI error view.
             poll_exit(&mut processes[idx]);
             let dir = processes[idx].project_dir.clone();
+            let host = processes[idx].host.clone();
             let was_failed = failed(&processes[idx]);
-            run_speck_apply_if_present(&dir);
+            run_speck_apply_if_present(&host, &dir);
             // Keep failed agents in the list so the user can see the
             // exit code + log tail (`d` dismisses explicitly). Clean
             // exits are still pruned immediately.
@@ -250,7 +254,7 @@ pub fn check_tty_alive(mode: &Mode, processes: &mut Vec<Process>) -> Option<usiz
             previous_selected,
         } => {
             if !process.alive.load(Ordering::SeqCst) {
-                run_speck_apply_if_present(&process.project_dir);
+                run_speck_apply_if_present(&process.host, &process.project_dir);
                 Some(*previous_selected)
             } else {
                 None
@@ -263,7 +267,7 @@ pub fn check_tty_alive(mode: &Mode, processes: &mut Vec<Process>) -> Option<usiz
 pub fn spawn_pty(
     pty_system: &NativePtySystem,
     cmd: &str,
-    args: &[&str],
+    args: &[String],
     title: Option<&str>,
     rows: u16,
     cols: u16,
@@ -335,6 +339,7 @@ pub fn spawn_pty(
         project_id: 0,
         project_dir: String::new(),
         worktree_dir: None,
+        host: ExecutionHost::Local,
         name,
         child: Some(child),
         master: Some(pair.master),
@@ -357,51 +362,138 @@ pub fn spawn_pty(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
+pub struct StatusOptions {
+    /// Local socket the in-process listener binds. For SSH processes this is
+    /// also the local destination of the `-R` forward.
+    pub local_socket: String,
+}
+
+pub enum Launch {
+    Local {
+        program: String,
+        args: Vec<String>,
+    },
+    Ssh {
+        target: SshTarget,
+        remote_command: String,
+        remote_status_socket: Option<String>,
+    },
+}
+
+pub struct SpawnSpec {
+    pub launch: Launch,
+    pub title: Option<String>,
+    pub rows: u16,
+    pub cols: u16,
+    /// Local working directory for the spawned client (ssh or the program).
+    pub local_cwd: String,
+    pub project_id: usize,
+    /// Working directory on the execution host.
+    pub project_dir: String,
+    pub worktree_dir: Option<String>,
+    pub status: Option<StatusOptions>,
+    pub activity_dot_enabled: bool,
+}
+
 pub fn spawn_process(
     pty_system: &NativePtySystem,
     next_id: &mut usize,
-    project_id: usize,
-    cmd: &str,
-    args: &[&str],
-    title: Option<&str>,
-    rows: u16,
-    cols: u16,
-    status_socket: Option<&str>,
-    cwd: &str,
-    worktree_dir: Option<&str>,
-    activity_dot_enabled: bool,
+    spec: SpawnSpec,
 ) -> std::io::Result<Process> {
     let id = *next_id;
     *next_id += 1;
 
-    let mut proc = spawn_pty(pty_system, cmd, args, title, rows, cols, cwd)?;
-    proc.id = id;
-    proc.project_id = project_id;
-    proc.project_dir = cwd.to_string();
-    proc.worktree_dir = worktree_dir.map(|s| s.to_string());
+    let host = match &spec.launch {
+        Launch::Local { .. } => ExecutionHost::Local,
+        Launch::Ssh { target, .. } => ExecutionHost::Ssh(target.clone()),
+    };
+    let name = spec.title.clone().unwrap_or_else(|| match &spec.launch {
+        Launch::Local { program, args } if args.is_empty() => program.clone(),
+        Launch::Local { program, args } => format!("{} {}", program, args.join(" ")),
+        Launch::Ssh { target, .. } => format!("ssh {}", target.host),
+    });
 
-    let (status_socket_path, shutdown_flag, listener_thread) = if let Some(path) = status_socket {
-        let name_shared = Arc::new(Mutex::new(proc.name.clone()));
-        let (flag, handle) = status::spawn_status_listener(
-            proc.status.clone(),
-            proc.active_ms.clone(),
-            proc.cycle_start.clone(),
-            proc.has_unread.clone(),
-            activity_dot_enabled,
-            path.to_string(),
+    let status_arc = Arc::new(AtomicU8::new(status::STATUS_NOT_YET));
+    let active_ms = Arc::new(AtomicU64::new(0));
+    let cycle_start = Arc::new(Mutex::new(None));
+    let has_unread = Arc::new(AtomicBool::new(false));
+    let name_shared = Arc::new(Mutex::new(name.clone()));
+
+    // Bind the local listener before spawning ssh: an `-R` forward connects
+    // to the local socket as soon as the SSH session is established.
+    let mut listener = None;
+    if let Some(status_opts) = &spec.status
+        && let Ok(started) = status::start_status_listener(
+            status_arc.clone(),
+            active_ms.clone(),
+            cycle_start.clone(),
+            has_unread.clone(),
+            spec.activity_dot_enabled,
+            status_opts.local_socket.clone(),
             name_shared.clone(),
-            proc.project_dir.clone(),
-        );
-        proc.name_shared = Some(name_shared);
-        (Some(path.to_string()), Some(flag), Some(handle))
-    } else {
-        (None, None, None)
+            spec.project_dir.clone(),
+            host.clone(),
+        )
+    {
+        listener = Some(started);
+    }
+
+    let mut forwards = Vec::new();
+    if let Some(started) = &listener
+        && let Launch::Ssh {
+            remote_status_socket: Some(remote_socket),
+            ..
+        } = &spec.launch
+    {
+        forwards.push((remote_socket.clone(), started.socket_path.clone()));
+    }
+
+    let (program, args) = match &spec.launch {
+        Launch::Local { program, args } => (program.clone(), args.clone()),
+        Launch::Ssh {
+            target,
+            remote_command,
+            ..
+        } => (
+            "ssh".to_string(),
+            remote::ssh_argv(target, remote_command, &forwards, remote::ssh_suffix()),
+        ),
     };
 
-    proc.status_socket_path = status_socket_path;
-    proc.shutdown_flag = shutdown_flag;
-    proc.listener_thread = listener_thread;
+    let mut proc = match spawn_pty(
+        pty_system,
+        &program,
+        &args,
+        spec.title.as_deref(),
+        spec.rows,
+        spec.cols,
+        &spec.local_cwd,
+    ) {
+        Ok(proc) => proc,
+        Err(e) => {
+            if let Some(listener) = listener {
+                listener.stop();
+            }
+            return Err(e);
+        }
+    };
+
+    proc.id = id;
+    proc.project_id = spec.project_id;
+    proc.project_dir = spec.project_dir;
+    proc.worktree_dir = spec.worktree_dir;
+    proc.host = host;
+    proc.status = status_arc;
+    proc.active_ms = active_ms;
+    proc.cycle_start = cycle_start;
+    proc.has_unread = has_unread;
+    proc.name_shared = Some(name_shared);
+
+    if let Some(listener) = listener {
+        proc.status_socket_path = Some(listener.socket_path.clone());
+        proc.shutdown_flag = Some(listener.shutdown);
+        proc.listener_thread = Some(listener.handle);
+    }
 
     Ok(proc)
 }
@@ -420,13 +512,32 @@ pub fn resize_parsers(processes: &mut [Process], rows: u16, cols: u16) {
     }
 }
 
-pub fn run_speck_apply_if_present(dir: &str) {
-    let speck_toml = std::path::Path::new(dir).join("Speck.toml");
-    if speck_toml.exists() {
-        let _ = std::process::Command::new("speck")
-            .arg("apply")
-            .current_dir(dir)
-            .status();
+/// Run `speck apply` when `Speck.toml` exists. Remote runs go through a
+/// detached background thread: they must never block the UI or the status
+/// listener on network I/O, and failures are best-effort.
+pub fn run_speck_apply_if_present(host: &ExecutionHost, dir: &str) {
+    match host {
+        ExecutionHost::Local => {
+            let speck_toml = std::path::Path::new(dir).join("Speck.toml");
+            if speck_toml.exists() {
+                let _ = std::process::Command::new("speck")
+                    .arg("apply")
+                    .current_dir(dir)
+                    .status();
+            }
+        }
+        ExecutionHost::Ssh(target) => {
+            let target = target.clone();
+            let dir = dir.to_string();
+            std::thread::spawn(move || {
+                let command = format!(
+                    "cd -- {} && test -f Speck.toml && speck apply",
+                    remote::shell_quote(&dir)
+                );
+                let args = remote::ssh_probe_argv(&target, &command, remote::ssh_suffix());
+                let _ = std::process::Command::new("ssh").args(args).status();
+            });
+        }
     }
 }
 
@@ -475,12 +586,12 @@ pub fn sync_statuses(processes: &mut [Process]) {
         if !newly_dead {
             continue;
         }
-        run_speck_apply_if_present(&p.project_dir);
+        run_speck_apply_if_present(&p.host, &p.project_dir);
         if p.worktree_dir
             .as_deref()
             .is_some_and(|d| d != p.project_dir)
         {
-            run_speck_apply_if_present(&p.effective_dir());
+            run_speck_apply_if_present(&p.host, &p.effective_dir());
         }
         #[cfg(not(test))]
         {
@@ -520,6 +631,7 @@ mod tests {
             project_id: 1,
             project_dir: String::new(),
             worktree_dir: None,
+            host: ExecutionHost::Local,
             name: "test [1]".into(),
             child: None,
             master: None,

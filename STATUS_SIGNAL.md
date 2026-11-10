@@ -15,6 +15,17 @@ The protocol is **one-directional**: zerostack connects to a pre-existing Unix s
 └──────────────┘                  └──────────────────┘
 ```
 
+### Remote projects
+
+For a project on an SSH server, multistack spawns `ssh -tt` with
+`-R <remote_socket>:<local_socket>` and passes `<remote_socket>` to zerostack's
+`--status-socket`. sshd listens on the remote socket and forwards each
+connection to multistack's local listener, so the wire protocol above is
+unchanged. This requires Unix-socket forwarding to be enabled on the server
+(`AllowStreamLocalForwarding yes`, the OpenSSH default). If forwarding is
+disabled, the agent still runs but no status signals arrive and the UI stays
+at `[ ]` until the process exits.
+
 ## Enabling
 
 ### Build

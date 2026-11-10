@@ -6,6 +6,7 @@ mod input;
 mod persistence;
 mod process;
 mod project;
+mod remote;
 mod status;
 mod ui;
 
@@ -30,9 +31,10 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 use ratatui_explorer_multistack::FileExplorer;
 
 use input::process_event;
-use persistence::{is_first_launch, load_project_dirs, mark_first_launch_seen};
+use persistence::{is_first_launch, load_project_targets, mark_first_launch_seen};
 use process::{Process, check_tty_alive, mark_tty_seen, sync_statuses};
 use project::{Project, build_entries};
+use remote::ProjectTarget;
 #[cfg(feature = "attach")]
 use ui::force_full_repaint;
 use ui::{HelpPage, enter_tty_real, exit_temp_tty_real, exit_tty_real, render, wipe_real};
@@ -71,6 +73,23 @@ struct Cli {
         help = "Disable the unread-activity dot shown when an agent finishes"
     )]
     no_activity_dot: bool,
+    /// Add a project that lives on an SSH server. Repeatable. The path must
+    /// be absolute on the remote host.
+    #[arg(
+        long = "remote",
+        value_name = "[user@]host[:port]/path",
+        action = clap::ArgAction::Append
+    )]
+    remote: Vec<String>,
+    /// Additional arguments appended to every ssh invocation.
+    #[arg(
+        long = "ssh-suffix",
+        value_name = "ARGS",
+        action = clap::ArgAction::Append,
+        allow_hyphen_values = true,
+        help = "Extra flags passed to the ssh client (repeatable, shell-quoted)"
+    )]
+    ssh_suffix: Vec<String>,
     /// Attach to another running multistack instance. With no value, attaches
     /// to the oldest running instance; with a PID (`--attach 1234`), attaches
     /// to that instance. Ctrl+\ detaches. Compile-time feature `attach`
@@ -90,6 +109,7 @@ pub enum PromptPurpose {
     NewProcess(usize),
     NewBareProcess(usize),
     NewProject,
+    NewRemoteProject,
     Rename(usize),
 }
 
@@ -138,6 +158,24 @@ async fn run(cli: Cli) -> std::io::Result<()> {
 }
 
 async fn run_server(cli: Cli) -> std::io::Result<()> {
+    // Validate ssh options and remote targets before entering the alternate
+    // screen so errors are readable on stderr.
+    if let Err(e) = remote::set_ssh_suffix(&cli.ssh_suffix) {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, e));
+    }
+    let mut remote_targets = Vec::new();
+    for spec in &cli.remote {
+        match remote::parse_target(spec) {
+            Ok(target) => remote_targets.push(target),
+            Err(e) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("invalid --remote {spec:?}: {e}"),
+                ));
+            }
+        }
+    }
+
     // Attach listener (server side). Bound before entering the alternate
     // screen so a bind failure is visible on stderr. A bind failure is
     // non-fatal: the session runs without attach.
@@ -196,42 +234,29 @@ async fn run_server(cli: Cli) -> std::io::Result<()> {
     let mut processes: Vec<Process> = Vec::new();
     let mut next_id: usize = 1;
 
-    let mut projects: Vec<Project> = Vec::new();
-    let mut next_project_id: usize = 2;
-
     let load_from_file = cli.continue_session && !cli.dont_save;
-    if load_from_file {
-        let dirs = load_project_dirs().unwrap_or_default();
-        if !dirs.is_empty() {
-            for (i, dir) in dirs.into_iter().enumerate() {
-                let id = i + 1;
-                let name = Path::new(&dir)
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or(&dir)
-                    .to_string();
-                projects.push(Project {
-                    id,
-                    name,
-                    directory: dir,
-                });
-            }
-            next_project_id = projects.len() + 1;
+    let mut targets: Vec<ProjectTarget> = if load_from_file {
+        load_project_targets().unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    targets.extend(remote_targets);
+
+    let mut projects: Vec<Project> = Vec::new();
+    for target in targets {
+        let key = target.identity_key();
+        if projects.iter().any(|p| p.target.identity_key() == key) {
+            continue;
         }
+        let id = projects.len() + 1;
+        projects.push(Project::from_target(id, target));
     }
+    let mut next_project_id: usize = projects.len() + 1;
 
     if projects.is_empty() {
         let cwd = std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf());
-        let main_name = cwd
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("main")
-            .to_string();
-        projects.push(Project {
-            id: 1,
-            name: main_name,
-            directory: cwd.to_string_lossy().to_string(),
-        });
+        let target = ProjectTarget::local(cwd.to_string_lossy().to_string());
+        projects.push(Project::from_target(1, target));
         next_project_id = 2;
     }
 
@@ -808,11 +833,7 @@ mod tests {
             viewport: ratatui::Viewport::Fixed(area),
         };
         let terminal = Terminal::with_options(backend, options).unwrap();
-        let projects = vec![Project {
-            id: 1,
-            name: "proj".into(),
-            directory: "/tmp".into(),
-        }];
+        let projects = vec![Project::local(1, "proj", "/tmp")];
         (
             Mode::Normal { selected: 0 },
             projects,

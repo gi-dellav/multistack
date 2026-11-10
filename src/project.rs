@@ -1,9 +1,26 @@
 use crate::process::Process;
+use crate::remote::ProjectTarget;
 
 pub struct Project {
     pub id: usize,
     pub name: String,
-    pub directory: String,
+    pub target: ProjectTarget,
+}
+
+impl Project {
+    #[cfg(test)]
+    pub fn local(id: usize, name: impl Into<String>, dir: impl Into<String>) -> Self {
+        Project {
+            id,
+            name: name.into(),
+            target: ProjectTarget::local(dir),
+        }
+    }
+
+    pub fn from_target(id: usize, target: ProjectTarget) -> Self {
+        let name = target.default_name();
+        Project { id, name, target }
+    }
 }
 
 pub enum ListEntry {
@@ -13,7 +30,9 @@ pub enum ListEntry {
 
 pub fn build_entries(projects: &[Project], processes: &[Process]) -> Vec<ListEntry> {
     let mut entries = Vec::new();
-    let show_headers = projects.len() > 1;
+    // A single local project has an implicit header; a remote project must
+    // always show its host, even when it is the only project in the list.
+    let show_headers = projects.len() > 1 || projects.iter().any(|p| p.target.is_remote());
 
     for proj in projects {
         if show_headers {
@@ -59,6 +78,7 @@ pub fn is_agent(entries: &[ListEntry], selected: usize) -> bool {
 mod tests {
     use super::*;
     use crate::process::Process;
+    use crate::remote::{ExecutionHost, SshTarget};
     use parking_lot::Mutex;
     use std::sync::{
         Arc,
@@ -71,6 +91,7 @@ mod tests {
             project_id,
             project_dir: format!("/tmp/proj{project_id}"),
             worktree_dir: None,
+            host: ExecutionHost::Local,
             name: format!("agent{id}"),
             child: None,
             master: None,
@@ -94,10 +115,21 @@ mod tests {
     }
 
     fn make_proj(id: usize, name: &str) -> Project {
+        Project::local(id, name, format!("/tmp/{name}"))
+    }
+
+    fn make_remote(id: usize, name: &str) -> Project {
         Project {
             id,
             name: name.into(),
-            directory: format!("/tmp/{name}"),
+            target: ProjectTarget::ssh(
+                SshTarget {
+                    user: Some("deploy".into()),
+                    host: "buildbox".into(),
+                    port: None,
+                },
+                format!("/srv/{name}"),
+            ),
         }
     }
 
@@ -112,11 +144,20 @@ mod tests {
     }
 
     #[test]
+    fn test_build_entries_single_remote_project_shows_header() {
+        let projects = vec![make_remote(1, "proj1")];
+        let processes = vec![make_proc(10, 1)];
+        let entries = build_entries(&projects, &processes);
+        assert_eq!(entries.len(), 2);
+        assert!(matches!(entries[0], ListEntry::ProjectHeader(1)));
+        assert!(matches!(entries[1], ListEntry::Agent(10)));
+    }
+
+    #[test]
     fn test_build_entries_multiple_projects_with_headers() {
         let projects = vec![make_proj(1, "a"), make_proj(2, "b")];
         let processes = vec![make_proc(1, 1), make_proc(2, 2), make_proc(3, 1)];
         let entries = build_entries(&projects, &processes);
-        // Should interleave headers and agents sorted by project order
         assert_eq!(entries.len(), 5);
         assert!(matches!(entries[0], ListEntry::ProjectHeader(1)));
         assert!(matches!(entries[1], ListEntry::Agent(1)));
@@ -139,7 +180,6 @@ mod tests {
         let projects = vec![make_proj(1, "a"), make_proj(2, "b")];
         let processes = vec![make_proc(10, 1)];
         let entries = build_entries(&projects, &processes);
-        // entries: Header1, Agent10, Header2
         assert_eq!(resolve_project(&entries, &projects, 0), Some(1));
         assert_eq!(resolve_project(&entries, &projects, 2), Some(2));
     }
@@ -149,7 +189,6 @@ mod tests {
         let projects = vec![make_proj(1, "a"), make_proj(2, "b")];
         let processes = vec![make_proc(10, 1), make_proc(20, 2)];
         let entries = build_entries(&projects, &processes);
-        // Header1, Agent10, Header2, Agent20
         assert_eq!(resolve_project(&entries, &projects, 1), Some(1));
         assert_eq!(resolve_project(&entries, &projects, 3), Some(2));
     }
